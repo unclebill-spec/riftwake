@@ -9,7 +9,6 @@ export const DEFAULT_BINDS: Binds = {
   down: "KeyS",
   left: "KeyA",
   right: "KeyD",
-  equip: "KeyE",
   pause: "Escape",
 };
 
@@ -33,7 +32,8 @@ export function loadSettings(): Settings {
     return {
       ...defaultSettings(),
       ...parsed,
-      binds: { ...DEFAULT_BINDS, ...parsed.binds },
+      // Older settings carry a removed manual-equip bind; drop it.
+      binds: { ...DEFAULT_BINDS, ...withoutEquip(parsed.binds) },
       difficulty: clamp(parsed.difficulty, 0, 4),
     };
   } catch {
@@ -70,4 +70,9 @@ export function blankGear() {
 function clamp(n: number, a: number, b: number): number {
   if (Number.isNaN(n)) return a;
   return Math.max(a, Math.min(b, Math.round(n)));
+}
+
+function withoutEquip(binds: Partial<Binds> & { equip?: unknown }): Partial<Binds> {
+  const { equip: _equip, ...rest } = binds;
+  return rest;
 }

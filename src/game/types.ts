@@ -53,7 +53,6 @@ export type Binds = {
   down: string;
   left: string;
   right: string;
-  equip: string;
   pause: string;
 };
 
@@ -179,12 +178,6 @@ export type Prop = {
   kind: "tree" | "boulder";
 };
 
-export type Prompt = {
-  title: string;
-  next: string;
-  prev: string;
-};
-
 export type Hud = {
   hp: number;
   maxHp: number;
@@ -209,7 +202,6 @@ export type Hud = {
   portalX: number;
   portalY: number;
   mode: Mode;
-  prompt: Prompt | null;
   hero: HeroId;
   clearedLevel: number;
   diffLabel: string;

@@ -170,7 +170,8 @@ export class Game {
   banner = "";
   bannerT = 0;
   clearedLevel = 1;
-  nearDrop = -1;
+  /** Seconds left on the '+' pop over the hero's head after an auto-equip upgrade (transient, never saved). */
+  plusT = 0;
 
   private run!: RunSave;
   private baseline!: RunSave;
@@ -189,13 +190,9 @@ export class Game {
   private fought = false;
   private eliteLeft = false;
   private diffIndex = 2;
-  private equipWas = false;
   private pauseWas = false;
   private gw = Math.ceil(ARENA / CELL);
   private buckets: number[][] = [];
-  private promptTitle = "";
-  private promptNext = "";
-  private promptPrev = "";
 
   readonly hud: Hud = {
     hp: 86,
@@ -221,7 +218,6 @@ export class Game {
     portalX: 0,
     portalY: 0,
     mode: "menu",
-    prompt: null,
     hero: "wizard",
     clearedLevel: 1,
     diffLabel: "Rift",
@@ -241,6 +237,9 @@ export class Game {
             kills: () => number;
             enemies: () => number;
             debug: () => unknown;
+            setShot: (t: ShotType) => void;
+            give: (slot: Slot | WeaponKind, tier: number, dx?: number, dy?: number) => void;
+            gear: () => unknown;
           };
         }).__riftwake = {
           killPortal: () => {
@@ -248,6 +247,30 @@ export class Game {
             this.portal.hp = -1;
           },
           kills: () => this.kills,
+          setShot: (t: ShotType) => {
+            this.run.mods.type = t;
+          },
+          // Lays one gear/weapon drop near the hero (screenshots/QA of auto-equip).
+          give: (slot: Slot | WeaponKind, tier: number, dx = 60, dy = 0) => {
+            const d = this.drops.find((n) => !n.alive);
+            if (!d) return;
+            const weapon = ["sword", "staff", "axe", "bow"].includes(slot);
+            d.alive = true;
+            d.x = this.player.x + dx;
+            d.y = this.player.y + dy;
+            d.grace = 0.3;
+            d.mod = null;
+            d.shot = null;
+            d.kind = weapon ? "weapon" : "gear";
+            d.gear = weapon ? null : makeGear(slot as Slot, tier);
+            d.weapon = weapon ? makeWeapon(slot as WeaponKind, tier) : null;
+          },
+          gear: () => ({
+            plusT: this.plusT,
+            weapon: this.run.weapon ? `${this.run.weapon.kind}:${this.run.weapon.tier}` : null,
+            gear: Object.fromEntries(SLOTS.map((k) => [k, this.run.gear[k]?.tier ?? 0])),
+            drops: this.drops.filter((n) => n.alive).length,
+          }),
           enemies: () => this.enemies.filter((e) => e.alive).length,
           debug: () => {
             let near = 9999;
@@ -426,7 +449,7 @@ export class Game {
     this.shake = 0;
     this.camReady = false;
     this.accum = 0;
-    this.nearDrop = -1;
+    this.plusT = 0;
     for (const e of this.enemies) e.alive = false;
     for (const p of this.projs) p.alive = false;
     for (const d of this.drops) d.alive = false;
@@ -567,9 +590,6 @@ export class Game {
     this.player.castT = Math.max(0, this.player.castT - dt);
     this.player.jumpT = Math.max(0, this.player.jumpT - dt);
     if (this.player.fireCd <= 0) this.fire();
-    const equip = this.pressed(this.settings.binds.equip);
-    if (equip && !this.equipWas) this.tryEquip();
-    this.equipWas = equip;
 
     if (!this.camReady) {
       this.camX = this.player.x;
@@ -1297,37 +1317,14 @@ export class Game {
   }
 
   private dropsStep(dt: number): void {
-    let best = -1;
-    let bestD = 34;
-    for (let i = 0; i < this.drops.length; i++) {
-      const d = this.drops[i];
+    this.plusT = Math.max(0, this.plusT - dt);
+    for (const d of this.drops) {
       if (!d?.alive) continue;
       d.grace = Math.max(0, d.grace - dt);
       const dist = Math.hypot(d.x - this.player.x, d.y - this.player.y);
-      if (d.kind === "gear" || d.kind === "weapon") {
-        if (d.grace <= 0 && dist < bestD) {
-          best = i;
-          bestD = dist;
-        }
-        continue;
-      }
-      if (dist < 24 && d.grace <= 0) this.takeInstant(d);
-    }
-    this.nearDrop = best;
-    if (best >= 0) {
-      const d = this.drops[best];
-      if (d?.gear) {
-        this.promptTitle = d.gear.name;
-        this.promptNext = `+${d.gear.hp} vitals · ${Math.round(d.gear.def * 100)}% defense · +${d.gear.radius} reach`;
-        const cur = this.run.gear[d.gear.slot];
-        this.promptPrev = cur
-          ? `${cur.name} · +${cur.hp} vitals · ${Math.round(cur.def * 100)}% defense · +${cur.radius} reach`
-          : "Empty slot";
-      } else if (d?.weapon) {
-        this.promptTitle = d.weapon.name;
-        this.promptNext = weaponBlurb(d.weapon.kind);
-        this.promptPrev = this.run.weapon ? `${this.run.weapon.name} · ${weaponBlurb(this.run.weapon.kind)}` : "Bare hands";
-      }
+      if (dist >= 24 || d.grace > 0) continue;
+      if (d.kind === "gear" || d.kind === "weapon") this.autoEquip(d);
+      else this.takeInstant(d);
     }
   }
 
@@ -1345,45 +1342,32 @@ export class Game {
     this.burst(this.player.x, this.player.y, "#e0b15a", 6);
   }
 
-  private tryEquip(): void {
-    if (this.nearDrop < 0) return;
-    const d = this.drops[this.nearDrop];
-    if (!d?.alive) return;
+  /**
+   * Auto-equip by tier only (Will, Oct 26). A higher tier than the item in that slot (or the
+   * current weapon, whatever its kind) equips and pops a '+' over the hero. Equal or lower tier
+   * is destroyed on pickup. Nothing is ever dropped back on the floor.
+   */
+  private autoEquip(d: Drop): void {
+    d.alive = false;
     if (d.gear) {
-      const prev = this.run.gear[d.gear.slot];
+      const cur = this.run.gear[d.gear.slot];
+      if (cur && d.gear.tier <= cur.tier) return this.destroyPoof(d);
       this.run.gear[d.gear.slot] = d.gear;
       const max = this.totals().hp;
       if (this.player.hp < max) this.player.hp = Math.min(max, this.player.hp + d.gear.hp);
-      d.alive = false;
-      if (prev) this.leave(prev, null);
     } else if (d.weapon) {
-      const prev = this.run.weapon;
+      const cur = this.run.weapon;
+      if (cur && d.weapon.tier <= cur.tier) return this.destroyPoof(d);
       this.run.weapon = d.weapon;
-      d.alive = false;
-      if (prev) this.leave(null, prev);
-    }
+    } else return;
+    this.plusT = PLUS_TIME;
     this.player.jumpT = 0.32;
     this.audio.pickup();
-    this.nearDrop = -1;
+    this.burst(this.player.x, this.player.y - 30, "#e0b15a", 8);
   }
 
-  private leave(gear: Drop["gear"], weapon: Drop["weapon"]): void {
-    const d = this.drops.find((n) => !n.alive);
-    if (!d) return;
-    const back = dirFromYaw(this.player.yaw + Math.PI);
-    d.alive = true;
-    d.x = this.player.x + back.x * 72;
-    d.y = this.player.y + back.y * 72;
-    d.grace = 0.45;
-    d.mod = null;
-    d.shot = null;
-    d.gear = gear;
-    d.weapon = weapon;
-    d.kind = gear ? "gear" : "weapon";
-  }
-
-  equipDown(): void {
-    this.tryEquip();
+  private destroyPoof(d: Drop): void {
+    this.burst(d.x, d.y, "#6b6f7a", 5);
   }
 
   private hurt(amount: number): void {
@@ -1480,9 +1464,6 @@ export class Game {
       row.filled = !!g;
       row.name = g?.name ?? "Empty";
     }
-    if (this.nearDrop >= 0 && (this.mode === "playing" || this.mode === "paused")) {
-      h.prompt = { title: this.promptTitle, next: this.promptNext, prev: this.promptPrev };
-    } else h.prompt = null;
   }
 }
 
@@ -1493,11 +1474,6 @@ function distSeg(px: number, py: number, x: number, y: number, dx: number, dy: n
   return Math.hypot(px - qx, py - qy);
 }
 
-function weaponBlurb(kind: WeaponKind): string {
-  if (kind === "sword") return "Faster, shorter shots";
-  if (kind === "staff") return "Beams and waves hit harder";
-  if (kind === "axe") return "Slow, heavy, small cleave";
-  return "Fast shots that pierce";
-}
+export const PLUS_TIME = 0.9;
 
 export const ARENA_SIZE = ARENA;

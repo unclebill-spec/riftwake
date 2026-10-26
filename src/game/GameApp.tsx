@@ -261,17 +261,8 @@ export function GameApp() {
             {hud.banner && (
               <p className="self-center rounded-md bg-surface/90 px-4 py-2 font-display text-accent">{hud.banner}</p>
             )}
-            {/* Armor slots live only in the pause menu's Gear tab. */}
-            <div className="flex items-end justify-end gap-3">
-              {hud.prompt && (
-                <div className="pointer-events-auto max-w-xs rounded-md bg-surface px-3 py-2">
-                  <p className="font-display text-sm text-accent">{hud.prompt.title}</p>
-                  <p className="text-xs text-fg">{hud.prompt.next}</p>
-                  <p className="text-xs text-muted">Equipped: {hud.prompt.prev}</p>
-                  <p className="mt-1 text-xs text-spell">Press {bindLabel(settings?.binds.equip ?? "KeyE")} to swap</p>
-                </div>
-              )}
-            </div>
+            {/* Armor slots live only in the pause menu's Gear tab. Gear auto-equips by tier, so no swap prompt. */}
+            <div />
           </div>
         )}
         {stickOn && showPlay && !portrait && (
@@ -293,13 +284,6 @@ export function GameApp() {
                 }
               }}
             />
-            <button
-              type="button"
-              className="absolute bottom-6 right-4 min-h-11 min-w-16 rounded-md bg-accent px-4 text-ink"
-              onClick={() => gameRef.current?.equipDown()}
-            >
-              Equip
-            </button>
             <button
               type="button"
               className="absolute right-4 top-4 min-h-11 rounded-md bg-surface px-3 text-fg"

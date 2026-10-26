@@ -1,3 +1,4 @@
+import { hash2, mulberry32 } from "@/game/rng";
 import type { ActorId, Anim } from "@/game/types";
 
 function browserImage(src: string): HTMLImageElement | null {
@@ -10,10 +11,21 @@ function browserImage(src: string): HTMLImageElement | null {
 const atlasImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/atlas.png?v=9`);
 const iconImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/icons.png`);
 const shotImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/shots.png`);
+// Reused spell FX (Gravewake fx2/gen/wow2): 6 rows x 4 frames of 32x16 art, pointing +x.
+const fxImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/shots-fx.png?v=1`);
 const floorImg: Record<string, HTMLImageElement | null> = {};
+// Reused Gravewake 16 px floor stones at 3x (48 px), darkened ~35%: FLOOR_VARIANTS cells per biome strip.
+const floorVarImg: Record<string, HTMLImageElement | null> = {};
+// Texture-only detail (cracks/pebbles/specks) from the same stones, 16 art px per variant, re-based on our floor colour.
+const floorDetailImg: Record<string, HTMLImageElement | null> = {};
 for (const id of ["rock", "forest", "snow", "ice", "lava"]) {
   floorImg[id] = browserImage(`${import.meta.env.BASE_URL}game/sprites/floor-${id}.png`);
+  floorVarImg[id] = browserImage(`${import.meta.env.BASE_URL}game/sprites/floor-var-${id}.png?v=1`);
+  floorDetailImg[id] = browserImage(`${import.meta.env.BASE_URL}game/sprites/floor-detail-${id}.png?v=3`);
 }
+export const FLOOR_VARIANTS = 5;
+/** Share of floor cells that get a reused Gravewake variant (seeded per cell, so a map looks the same every load). */
+export const FLOOR_VARIANT_RATE = 0.1;
 const propImg: Record<"tree" | "boulder", HTMLImageElement | null> = {
   tree: browserImage(`${import.meta.env.BASE_URL}game/sprites/tree.png`),
   boulder: browserImage(`${import.meta.env.BASE_URL}game/sprites/boulder.png`),
@@ -34,10 +46,54 @@ export function drawFloorTile(ctx: CanvasRenderingContext2D, biome: string, x: n
   return true;
 }
 
+/** Draws floor variant `v` (0..FLOOR_VARIANTS-1) over a base tile at `alpha`; false if not loaded. */
+export function drawFloorVariant(ctx: CanvasRenderingContext2D, biome: string, v: number, x: number, y: number, size: number, alpha: number): boolean {
+  const img = floorVarImg[biome];
+  if (!img?.complete || img.naturalWidth === 0) return false;
+  const a = ctx.globalAlpha;
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(img, v * 48, 0, 48, 48, x, y, size, size);
+  ctx.globalAlpha = a;
+  return true;
+}
+
 export function drawPropSprite(ctx: CanvasRenderingContext2D, kind: "tree" | "boulder", x: number, y: number, size: number): boolean {
   const img = propImg[kind];
   if (!img?.complete || img.naturalWidth === 0) return false;
   ctx.drawImage(img, Math.round(x - size / 2), Math.round(y - size / 2), size, size);
+  return true;
+}
+
+/**
+ * Animated reused spell FX: frame `f` of the type's row, rotated to the travel angle, each art
+ * pixel drawn as `px` world px (nearest). Falls back to the old static cell while loading.
+ */
+export function drawShotFx(ctx: CanvasRenderingContext2D, type: string, x: number, y: number, angle: number, f: number, px: number): boolean {
+  const row = SHOT_INDEX.indexOf(type);
+  if (row < 0 || !fxImg?.complete || fxImg.naturalWidth === 0) return drawShotSprite(ctx, type, x, y, 28);
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.translate(Math.round(x), Math.round(y));
+  ctx.rotate(angle);
+  // The front of each projectile sits at the right edge of its cell; centre the head on (x, y).
+  ctx.drawImage(fxImg, (f & 3) * 32, row * 16, 32, 16, -24 * px, -8 * px, 32 * px, 16 * px);
+  ctx.restore();
+  return true;
+}
+
+/** Tiles the reused beam strip (row 1) along a hitscan beam from (x, y) in direction `angle`. */
+export function drawBeamFx(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number, len: number, f: number, px: number): boolean {
+  if (!fxImg?.complete || fxImg.naturalWidth === 0) return false;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.translate(Math.round(x), Math.round(y));
+  ctx.rotate(angle);
+  const seg = 32 * px;
+  for (let d = 0; d < len; d += seg) {
+    const w = Math.min(seg, len - d);
+    ctx.drawImage(fxImg, (f & 3) * 32, 16, w / px, 16, d, -8 * px, w, 16 * px);
+  }
+  ctx.restore();
   return true;
 }
 
@@ -481,4 +537,98 @@ export function iconURL(name: string): string {
   const i = Math.max(0, ICONS.indexOf(name as (typeof ICONS)[number]));
   ctx.drawImage(sheet, i * 16, 0, 16, 16, 0, 0, 32, 32);
   return c.toDataURL();
+}
+
+/** Floor detail overlay: 1 canvas px = FLOOR_DETAIL_PX world px. */
+export const FLOOR_DETAIL_PX = 3;
+const BAYER4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+let detailCache: { key: string; canvas: HTMLCanvasElement } | null = null;
+
+/**
+ * Irregular seeded detail patches: blobs grown 2-4 cells from mulberry32(seed), each a union of jittered
+ * circles, edged by a hard 3-band ordered dither (100% / 50% / 25%). Opaque pixels only, no alpha, no AA.
+ * Built once per seed+biome so the map is identical every load. Returns null until the art has loaded.
+ */
+export function floorDetail(seed: number, biome: string, arena: number, cell: number, skip: (x: number, y: number) => boolean, rate: number): HTMLCanvasElement | null {
+  const key = `${seed}:${biome}`;
+  if (detailCache?.key === key) return detailCache.canvas;
+  const img = floorDetailImg[biome];
+  if (typeof document === "undefined" || !img?.complete || img.naturalWidth === 0) return null;
+  const src = document.createElement("canvas");
+  src.width = img.naturalWidth;
+  src.height = img.naturalHeight;
+  const sctx = src.getContext("2d");
+  if (!sctx) return null;
+  sctx.drawImage(img, 0, 0);
+  const sd = sctx.getImageData(0, 0, src.width, src.height).data;
+  const P = FLOOR_DETAIL_PX;
+  const n = Math.ceil(arena / P);
+  const cpx = cell / P; // art px per cell (16)
+  const cells = Math.ceil(arena / cell);
+  const level = new Uint8Array(n * n);
+  const varOf = new Uint16Array(n * n); // variant*256 + offset seed
+  const rng = mulberry32((seed ^ 0x5eed) >>> 0);
+  const blobs = Math.round((cells * cells * rate) / 3);
+  for (let b = 0; b < blobs; b++) {
+    let cx = Math.floor(rng() * cells);
+    let cy = Math.floor(rng() * cells);
+    const size = 2 + Math.floor(rng() * 3);
+    const tag = (Math.floor(rng() * FLOOR_VARIANTS) << 8) | Math.floor(rng() * 256);
+    const parts: [number, number, number][] = [];
+    for (let k = 0; k < size; k++) {
+      parts.push([(cx + 0.2 + rng() * 0.6) * cpx, (cy + 0.2 + rng() * 0.6) * cpx, cpx * (0.55 + rng() * 0.3)]);
+      const dir = Math.floor(rng() * 4);
+      cx += dir === 0 ? 1 : dir === 1 ? -1 : 0;
+      cy += dir === 2 ? 1 : dir === 3 ? -1 : 0;
+    }
+    for (const [ox, oy, r] of parts) {
+      const R = r + 3;
+      for (let y = Math.max(0, Math.floor(oy - R)); y < Math.min(n, Math.ceil(oy + R)); y++) {
+        for (let x = Math.max(0, Math.floor(ox - R)); x < Math.min(n, Math.ceil(ox + R)); x++) {
+          // Coarse 3x3-px jitter keeps the rim organic without single-pixel noise.
+          const j = (hash2(seed ^ 0x7a11, Math.floor(x / 3), Math.floor(y / 3)) - 0.5) * 5;
+          const s = r + j - Math.hypot(x + 0.5 - ox, y + 0.5 - oy);
+          const lv = s > 5 ? 3 : s > 2.5 ? 2 : s > 0 ? 1 : 0;
+          const i = y * n + x;
+          if (lv > level[i]) {
+            level[i] = lv;
+            varOf[i] = tag;
+          }
+        }
+      }
+    }
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = n;
+  canvas.height = n;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const out = ctx.createImageData(n, n);
+  const od = out.data;
+  const sw = src.width;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const i = y * n + x;
+      const lv = level[i];
+      if (!lv) continue;
+      const t = BAYER4[(y & 3) * 4 + (x & 3)];
+      if (lv === 2 && t >= 8) continue;
+      if (lv === 1 && t >= 4) continue;
+      if (skip(x * P + 1, y * P + 1)) continue;
+      const tag = varOf[i];
+      const v = tag >> 8;
+      const off = tag & 255;
+      const u = (x + off) % 16;
+      const w = (y + (off >> 4)) % 16;
+      const si = (w * sw + v * 16 + u) * 4;
+      if (sd[si + 3] < 128) continue;
+      od[i * 4] = sd[si];
+      od[i * 4 + 1] = sd[si + 1];
+      od[i * 4 + 2] = sd[si + 2];
+      od[i * 4 + 3] = 255;
+    }
+  }
+  ctx.putImageData(out, 0, 0);
+  detailCache = { key, canvas };
+  return canvas;
 }

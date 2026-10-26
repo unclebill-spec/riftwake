@@ -1,5 +1,16 @@
-import { ARENA_SIZE, type Game } from "@/game/sim";
-import { blit, drawFloorTile, drawIcon, drawPropSprite, drawShotSprite, ensureIcons } from "@/game/sprites";
+import { ARENA_SIZE, PLUS_TIME, type Game } from "@/game/sim";
+import {
+  blit,
+  drawBeamFx,
+  drawFloorTile,
+  floorDetail,
+  FLOOR_DETAIL_PX,
+  drawIcon,
+  drawPropSprite,
+  drawShotFx,
+  ensureIcons,
+  FLOOR_VARIANT_RATE,
+} from "@/game/sprites";
 import { hash2 } from "@/game/rng";
 import type { ShotType } from "@/game/types";
 import { monsterName } from "@/game/types";
@@ -112,11 +123,13 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
     else drawHero(ctx, game);
   }
   ctx.globalCompositeOperation = "lighter";
+  const fxFrame = Math.floor(now / 90) & 3;
   for (const b of game.beams) {
     if (!b.alive) continue;
-    ctx.strokeStyle = SHOT.beam;
     ctx.globalAlpha = Math.max(0.3, b.life / 0.12);
-    ctx.lineWidth = 4;
+    const fxOk = drawBeamFx(ctx, b.x, b.y, Math.atan2(b.dy, b.dx), b.len, fxFrame, 2);
+    ctx.strokeStyle = SHOT.beam;
+    ctx.lineWidth = fxOk ? 2 : 4;
     ctx.beginPath();
     ctx.moveTo(b.x, b.y);
     ctx.lineTo(b.x + b.dx * b.len, b.y + b.dy * b.len);
@@ -128,7 +141,11 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
     const color = p.friendly ? SHOT[p.type] : "rgba(255,70,60,0.95)";
     const r = p.type === "wave" ? 46 : p.type === "beam" ? 18 : p.type === "fire" ? 28 : 22;
     light(ctx, p.x, p.y, r, color, 1);
-    if (p.friendly) drawShotSprite(ctx, p.type, p.x, p.y, p.type === "wave" ? 36 : 28);
+    if (p.friendly) {
+      // Wave ripples face their wavefront across the travel line.
+      const ang = Math.atan2(p.vy, p.vx) + (p.type === "wave" ? Math.PI / 2 : 0);
+      drawShotFx(ctx, p.type, p.x, p.y, ang, fxFrame, 2);
+    }
     ctx.globalAlpha = 1;
     ctx.strokeStyle = color;
     ctx.lineWidth = p.type === "wave" ? 7 : 4;
@@ -169,6 +186,7 @@ function drawMenu(ctx: CanvasRenderingContext2D, w: number, h: number, now: numb
   }
 }
 
+
 function drawFloor(game: Game, ctx: CanvasRenderingContext2D, w: number, h: number): void {
   const colors = FLOOR[game.biome];
   const x0 = Math.floor((game.camX - w / 2) / TILE) - 1;
@@ -194,6 +212,16 @@ function drawFloor(game: Game, ctx: CanvasRenderingContext2D, w: number, h: numb
       }
       if (lava) light(ctx, px + TILE / 2, py + TILE / 2, 30, "rgba(255,110,40,0.9)", 0.7);
     }
+  }
+  // Reused Gravewake stone texture in irregular seeded blobs with a hard dither rim (no tile edges).
+  const det = floorDetail(game.seed, game.biome, ARENA_SIZE, TILE, (x, y) => game.lavaAt(x, y), FLOOR_VARIANT_RATE);
+  if (det) {
+    const P = FLOOR_DETAIL_PX;
+    const sx = Math.max(0, x0 * TILE / P);
+    const sy = Math.max(0, y0 * TILE / P);
+    const sw = Math.min(det.width - sx, ((x1 - x0 + 1) * TILE) / P);
+    const sh = Math.min(det.height - sy, ((y1 - y0 + 1) * TILE) / P);
+    if (sw > 0 && sh > 0) ctx.drawImage(det, sx, sy, sw, sh, sx * P, sy * P, sw * P, sh * P);
   }
 }
 
@@ -336,6 +364,24 @@ function drawHero(ctx: CanvasRenderingContext2D, game: Game): void {
   const anim = p.jumpT > 0 ? "jump" : "walk";
   const frame = anim === "walk" ? p.frame : Math.min(3, Math.floor((0.35 - p.jumpT) * 12));
   blit(ctx, p.actor, anim, p.facing, frame, p.x, p.y, 1.35);
+  if (game.plusT > 0) drawPlus(ctx, p.x, p.y - 54, game.plusT / PLUS_TIME);
+}
+
+/** Short gold '+' over the hero's head after an auto-equip upgrade: rises ~20 world px and fades. */
+function drawPlus(ctx: CanvasRenderingContext2D, x: number, y: number, k: number): void {
+  const t = 1 - k;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, k * 2.2);
+  ctx.font = "bold 34px Outfit, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = "#14161c";
+  const yy = Math.round(y - t * 20);
+  ctx.strokeText("+", Math.round(x), yy);
+  ctx.fillStyle = "#e0b15a";
+  ctx.fillText("+", Math.round(x), yy);
+  ctx.restore();
 }
 
 function vignette(ctx: CanvasRenderingContext2D, w: number, h: number): void {
