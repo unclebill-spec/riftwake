@@ -511,10 +511,16 @@ export function GameApp() {
           </section>
         )}
       </div>
-      <div className="rotate-gate absolute inset-0 z-20 items-center justify-center bg-bg p-6 text-center">
-        <div>
-          <h2 className="font-display text-3xl text-accent">Rotate to landscape</h2>
-          <p className="mt-3 max-w-xs text-sm text-muted">Riftwake plays on a wide field. Turn the device, or widen the window.</p>
+      <div role="alert" className="rotate-gate fixed inset-0 z-50 items-center justify-center bg-[#05060a] p-8 text-center">
+        <div className="flex flex-col items-center">
+          <svg aria-hidden="true" viewBox="0 0 96 96" className="h-28 w-28 text-accent" fill="none" stroke="currentColor" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="30" y="14" width="36" height="62" rx="6" />
+            <line x1="44" y1="66" x2="52" y2="66" />
+            <path d="M14 58 a36 36 0 0 0 26 28" />
+            <polyline points="30,88 40,86 38,76" />
+          </svg>
+          <h2 className="mt-8 font-display text-5xl leading-tight text-accent">Rotate your phone</h2>
+          <p className="mt-5 max-w-xs text-2xl leading-snug text-white">Turn it sideways to play Riftwake.</p>
         </div>
       </div>
     </main>
