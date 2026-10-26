@@ -7,16 +7,16 @@ function browserImage(src: string): HTMLImageElement | null {
   return img;
 }
 
-const atlasImg = browserImage(import.meta.env.BASE_URL + "game/sprites/atlas.png?v=9");
-const iconImg = browserImage(import.meta.env.BASE_URL + "game/sprites/icons.png");
-const shotImg = browserImage(import.meta.env.BASE_URL + "game/sprites/shots.png");
+const atlasImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/atlas.png?v=9`);
+const iconImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/icons.png`);
+const shotImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/shots.png`);
 const floorImg: Record<string, HTMLImageElement | null> = {};
 for (const id of ["rock", "forest", "snow", "ice", "lava"]) {
   floorImg[id] = browserImage(`${import.meta.env.BASE_URL}game/sprites/floor-${id}.png`);
 }
 const propImg: Record<"tree" | "boulder", HTMLImageElement | null> = {
-  tree: browserImage(import.meta.env.BASE_URL + "game/sprites/tree.png"),
-  boulder: browserImage(import.meta.env.BASE_URL + "game/sprites/boulder.png"),
+  tree: browserImage(`${import.meta.env.BASE_URL}game/sprites/tree.png`),
+  boulder: browserImage(`${import.meta.env.BASE_URL}game/sprites/boulder.png`),
 };
 
 const SHOT_INDEX = ["bolt", "beam", "wave", "fire", "ice", "water"];
