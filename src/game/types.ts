@@ -169,6 +169,8 @@ export type Part = {
   max: number;
   color: string;
   size: number;
+  /** Hard square pixels (destroy poof) instead of a soft glow. Transient, never saved. */
+  hard?: boolean;
 };
 
 export type Prop = {

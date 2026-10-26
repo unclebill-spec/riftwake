@@ -160,6 +160,17 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
   }
   for (const p of game.parts) {
     if (!p.alive) continue;
+    if (p.hard) {
+      // Hard pixels: snapped squares, stepped fade (no smooth alpha ramp).
+      const t = p.life / p.max;
+      const s = Math.round(p.size * 2 * (t > 0.5 ? 1 : 0.75));
+      ctx.globalAlpha = t > 0.5 ? 1 : 0.6;
+      ctx.fillStyle = "#14161c";
+      ctx.fillRect(Math.round(p.x - s / 2) - 2, Math.round(p.y - s / 2) - 2, s + 4, s + 4);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(Math.round(p.x - s / 2), Math.round(p.y - s / 2), s, s);
+      continue;
+    }
     ctx.globalAlpha = Math.max(0, p.life / p.max);
     light(ctx, p.x, p.y, 8 + p.size, p.color, 0.8);
   }

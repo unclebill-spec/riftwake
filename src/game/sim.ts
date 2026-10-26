@@ -1367,7 +1367,8 @@ export class Game {
   }
 
   private destroyPoof(d: Drop): void {
-    this.burst(d.x, d.y, "#6b6f7a", 5);
+    // ~2x the old poof: more, bigger, faster hard grey pixels; still short-lived.
+    this.burst(d.x, d.y, "#9aa0ac", 10, 2, true);
   }
 
   private hurt(amount: number): void {
@@ -1396,13 +1397,13 @@ export class Game {
     }
   }
 
-  private burst(x: number, y: number, color: string, n: number): void {
+  private burst(x: number, y: number, color: string, n: number, scale = 1, hard = false): void {
     let left = n;
     for (const p of this.parts) {
       if (left <= 0) break;
       if (p.alive) continue;
       const a = Math.random() * Math.PI * 2;
-      const s = 20 + Math.random() * 70;
+      const s = (20 + Math.random() * 70) * scale;
       p.alive = true;
       p.x = x;
       p.y = y;
@@ -1411,7 +1412,8 @@ export class Game {
       p.life = 0.25 + Math.random() * 0.25;
       p.max = p.life;
       p.color = color;
-      p.size = 2 + Math.random() * 2;
+      p.size = (2 + Math.random() * 2) * scale;
+      p.hard = hard;
       left -= 1;
     }
   }
