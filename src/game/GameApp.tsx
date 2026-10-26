@@ -286,7 +286,7 @@ export function GameApp() {
             />
             <button
               type="button"
-              className="absolute right-4 top-4 min-h-11 rounded-md bg-surface px-3 text-fg"
+              className="absolute bottom-4 right-4 min-h-11 rounded-md bg-surface px-3 text-fg"
               onClick={() => gameRef.current?.togglePause()}
             >
               Pause

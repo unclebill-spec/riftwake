@@ -1409,7 +1409,8 @@ export class Game {
       p.y = y;
       p.vx = Math.cos(a) * s;
       p.vy = Math.sin(a) * s;
-      p.life = 0.25 + Math.random() * 0.25;
+      // Hard poof: a fixed ~400 ms (two-step fade at half life); soft sparks keep 250-500 ms.
+      p.life = hard ? POOF_TIME : 0.25 + Math.random() * 0.25;
       p.max = p.life;
       p.color = color;
       p.size = (2 + Math.random() * 2) * scale;
@@ -1477,5 +1478,6 @@ function distSeg(px: number, py: number, x: number, y: number, dx: number, dy: n
 }
 
 export const PLUS_TIME = 0.9;
+export const POOF_TIME = 0.4;
 
 export const ARENA_SIZE = ARENA;
