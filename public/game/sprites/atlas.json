@@ -1,0 +1,49 @@
+{
+ "cell": 64,
+ "grid": "32x32 nearest x2",
+ "columns": [
+  "N",
+  "NE",
+  "E",
+  "SE",
+  "S",
+  "SW",
+  "W",
+  "NW"
+ ],
+ "anims": {
+  "walk": [
+   0,
+   4
+  ],
+  "cast": [
+   4,
+   3
+  ],
+  "jump": [
+   7,
+   4
+  ]
+ },
+ "actors": [
+  "wizard",
+  "warrior",
+  "skeleton",
+  "orc",
+  "zombie",
+  "vampire",
+  "ghost",
+  "minotaur",
+  "satyr",
+  "sphinx",
+  "succubus",
+  "incubus",
+  "angel",
+  "spider",
+  "bear",
+  "alligator",
+  "tiger"
+ ],
+ "note": "Redrawn 2026-10-26 by tools/sprite_writer.py: one locked base design per actor, real stride walks, hard alpha, no magenta. Locked: do not regenerate.",
+ "missing": []
+}

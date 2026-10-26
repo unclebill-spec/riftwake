@@ -1,0 +1,371 @@
+import { ARENA_SIZE, type Game } from "@/game/sim";
+import { blit, drawFloorTile, drawIcon, drawPropSprite, drawShotSprite, ensureIcons } from "@/game/sprites";
+import { hash2 } from "@/game/rng";
+import type { ShotType } from "@/game/types";
+import { monsterName } from "@/game/types";
+import { DROP_HALO_WORLD, DROP_ICON_WORLD, GEAR_HEX, POWER_GLYPH, POWER_HEX, powerKey } from "@/game/drops";
+
+const TILE = 48;
+/** World drawn smaller so more of the rift fits on screen. */
+export const VIEW_ZOOM = 0.58;
+const SHOT: Record<ShotType, string> = {
+  bolt: "rgba(94,242,255,0.95)",
+  beam: "rgba(255,74,216,0.95)",
+  wave: "rgba(180,107,255,0.92)",
+  fire: "rgba(255,122,41,0.95)",
+  ice: "rgba(215,244,255,0.95)",
+  water: "rgba(46,224,192,0.95)",
+};
+
+const glows = new Map<string, HTMLCanvasElement>();
+const sortBuf: { y: number; k: number; i: number }[] = Array.from({ length: 420 }, () => ({ y: 0, k: 0, i: 0 }));
+
+function glow(color: string): HTMLCanvasElement {
+  const hit = glows.get(color);
+  if (hit) return hit;
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const ctx = c.getContext("2d");
+  if (!ctx) return c;
+  const g = ctx.createRadialGradient(32, 32, 2, 32, 32, 32);
+  g.addColorStop(0, color);
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  glows.set(color, c);
+  return c;
+}
+
+function light(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color: string, alpha = 1): void {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(glow(color), x - r, y - r, r * 2, r * 2);
+  ctx.restore();
+}
+
+const FLOOR: Record<Game["biome"], string[]> = {
+  rock: ["#14171e", "#171b22", "#1a1e26", "#12151b"],
+  forest: ["#101610", "#141c14", "#182018", "#0e140e"],
+  snow: ["#222830", "#262d36", "#2a323b", "#1e242c"],
+  ice: ["#152028", "#18242e", "#1c2a34", "#121c24"],
+  lava: ["#1a1210", "#201614", "#261a16", "#140e0c"],
+};
+
+export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number, h: number, now: number): void {
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = "#0c0e12";
+  ctx.fillRect(0, 0, w, h);
+  if (game.mode === "menu") {
+    drawMenu(ctx, w, h, now);
+    return;
+  }
+  const shake = game.shake;
+  const sx = Math.sin(now * 0.04) * shake;
+  const sy = Math.cos(now * 0.033) * shake;
+  const worldW = w / VIEW_ZOOM;
+  const worldH = h / VIEW_ZOOM;
+  ctx.save();
+  ctx.translate(w / 2 + sx, h / 2 + sy);
+  ctx.scale(VIEW_ZOOM, VIEW_ZOOM);
+  ctx.translate(-game.camX, -game.camY);
+  drawFloor(game, ctx, worldW, worldH);
+  let n = 0;
+  const push = (y: number, k: number, i: number) => {
+    const slot = sortBuf[n];
+    if (!slot) return;
+    slot.y = y;
+    slot.k = k;
+    slot.i = i;
+    n += 1;
+  };
+  for (let i = 0; i < game.props.length && n < 400; i++) {
+    const p = game.props[i];
+    if (!p || !onscreen(game, p.x, p.y, worldW, worldH, 80)) continue;
+    push(p.y, 0, i);
+  }
+  for (let i = 0; i < game.drops.length && n < 410; i++) {
+    const d = game.drops[i];
+    if (!d?.alive || !onscreen(game, d.x, d.y, worldW, worldH, 40)) continue;
+    push(d.y, 2, i);
+  }
+  push(game.portal.y, 4, 0);
+  for (let i = 0; i < game.enemies.length && n < 418; i++) {
+    const e = game.enemies[i];
+    if (!e?.alive || !onscreen(game, e.x, e.y, worldW, worldH, 80)) continue;
+    push(e.y, 1, i);
+  }
+  push(game.player.y, 3, 0);
+  for (let i = n; i < sortBuf.length; i++) {
+    const spare = sortBuf[i];
+    if (spare) spare.y = 1e9;
+  }
+  sortBuf.sort((a, b) => a.y - b.y);
+  for (let i = 0; i < n; i++) {
+    const item = sortBuf[i];
+    if (!item || item.y > 1e8) break;
+    if (item.k === 0) drawProp(ctx, game.props[item.i]);
+    else if (item.k === 2) drawDrop(ctx, game, item.i, now);
+    else if (item.k === 4) drawPortal(ctx, game, now);
+    else if (item.k === 1) drawEnemy(ctx, game, item.i);
+    else drawHero(ctx, game);
+  }
+  ctx.globalCompositeOperation = "lighter";
+  for (const b of game.beams) {
+    if (!b.alive) continue;
+    ctx.strokeStyle = SHOT.beam;
+    ctx.globalAlpha = Math.max(0.3, b.life / 0.12);
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(b.x, b.y);
+    ctx.lineTo(b.x + b.dx * b.len, b.y + b.dy * b.len);
+    ctx.stroke();
+    light(ctx, b.x + b.dx * b.len * 0.5, b.y + b.dy * b.len * 0.5, 36, SHOT.beam, 0.8);
+  }
+  for (const p of game.projs) {
+    if (!p.alive) continue;
+    const color = p.friendly ? SHOT[p.type] : "rgba(255,70,60,0.95)";
+    const r = p.type === "wave" ? 46 : p.type === "beam" ? 18 : p.type === "fire" ? 28 : 22;
+    light(ctx, p.x, p.y, r, color, 1);
+    if (p.friendly) drawShotSprite(ctx, p.type, p.x, p.y, p.type === "wave" ? 36 : 28);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = p.type === "wave" ? 7 : 4;
+    ctx.beginPath();
+    const mag = Math.hypot(p.vx, p.vy) || 1;
+    ctx.moveTo(p.x - (p.vx / mag) * 16, p.y - (p.vy / mag) * 16);
+    ctx.lineTo(p.x + (p.vx / mag) * 6, p.y + (p.vy / mag) * 6);
+    ctx.stroke();
+    ctx.strokeStyle = "#f4fbff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  for (const p of game.parts) {
+    if (!p.alive) continue;
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    light(ctx, p.x, p.y, 8 + p.size, p.color, 0.8);
+  }
+  ctx.restore();
+  vignette(ctx, w, h);
+  if (game.player.hurtCd > 0.5) {
+    ctx.fillStyle = "rgba(180, 40, 32, 0.16)";
+    ctx.fillRect(0, 0, w, h);
+  }
+  if (game.player.rage > 0) {
+    ctx.strokeStyle = "rgba(224,177,90,0.7)";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(8, 8, w - 16, h - 16);
+  }
+  if (game.wave >= 5) drawArrow(ctx, game, w, h);
+}
+
+function drawMenu(ctx: CanvasRenderingContext2D, w: number, h: number, now: number): void {
+  for (let i = 0; i < 7; i++) {
+    const colors = [SHOT.bolt, SHOT.beam, SHOT.wave, SHOT.fire, SHOT.ice, SHOT.water, SHOT.bolt];
+    const x = ((now * 0.04 + i * 180) % (w + 160)) - 80;
+    const y = h * 0.35 + Math.sin(now * 0.001 + i) * 80 + i * 18;
+    light(ctx, x, y, 28, colors[i] ?? SHOT.bolt, 0.7);
+  }
+}
+
+function drawFloor(game: Game, ctx: CanvasRenderingContext2D, w: number, h: number): void {
+  const colors = FLOOR[game.biome];
+  const x0 = Math.floor((game.camX - w / 2) / TILE) - 1;
+  const y0 = Math.floor((game.camY - h / 2) / TILE) - 1;
+  const x1 = Math.floor((game.camX + w / 2) / TILE) + 2;
+  const y1 = Math.floor((game.camY + h / 2) / TILE) + 2;
+  for (let cy = y0; cy <= y1; cy++) {
+    for (let cx = x0; cx <= x1; cx++) {
+      const px = cx * TILE;
+      const py = cy * TILE;
+      if (px < -TILE || py < -TILE || px > ARENA_SIZE || py > ARENA_SIZE) continue;
+      const lava = game.lavaAt(px + 8, py + 8);
+      const painted = drawFloorTile(ctx, game.biome, px, py, TILE);
+      if (!painted) {
+        const hsh = hash2(game.seed, cx, cy);
+        ctx.fillStyle = lava ? "#4a1c10" : (colors[Math.floor(hsh * 3) % colors.length] ?? "#14171e");
+        ctx.fillRect(px, py, TILE, TILE);
+        const n2 = hash2(game.seed ^ 91, cx, cy);
+        ctx.fillStyle = lava ? "#6a2814" : (colors[Math.floor(n2 * colors.length)] ?? "#171b22");
+        ctx.fillRect(px + (n2 > 0.5 ? 6 : 22), py + 8, 14, 8);
+        ctx.fillStyle = "rgba(0,0,0,0.28)";
+        if (hsh > 0.84) ctx.fillRect(px + 6, py + 22, 12, 2);
+      }
+      if (lava) light(ctx, px + TILE / 2, py + TILE / 2, 30, "rgba(255,110,40,0.9)", 0.7);
+    }
+  }
+}
+
+function drawProp(ctx: CanvasRenderingContext2D, prop: { x: number; y: number; r: number; kind: "tree" | "boulder" } | undefined): void {
+  if (!prop) return;
+  if (drawPropSprite(ctx, prop.kind, prop.x, prop.y, prop.r * 2.4)) return;
+  if (prop.kind === "tree") {
+    ctx.fillStyle = "#2a2118";
+    ctx.fillRect(prop.x - 3, prop.y - 4, 6, 16);
+    ctx.fillStyle = "#1a2a18";
+    ctx.beginPath();
+    ctx.arc(prop.x, prop.y - 10, prop.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#10160f";
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = "#3a404a";
+    ctx.beginPath();
+    ctx.ellipse(prop.x, prop.y, prop.r, prop.r * 0.72, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#4a5260";
+    ctx.beginPath();
+    ctx.ellipse(prop.x - 3, prop.y - 3, prop.r * 0.45, prop.r * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawDrop(ctx: CanvasRenderingContext2D, game: Game, index: number, now: number): void {
+  const d = game.drops[index];
+  if (!d) return;
+  const bob = Math.sin(now * 0.005 + index) * 3;
+  const pulse = 0.5 + 0.5 * Math.sin(now * 0.006 + index * 1.7);
+  const key = powerKey(d);
+  const color = key ? POWER_HEX[key] : GEAR_HEX;
+  const size = DROP_ICON_WORLD;
+  const cy = d.y - size * 0.55 + bob;
+  // Ground halo.
+  ctx.save();
+  ctx.globalAlpha = 0.35 + 0.25 * pulse;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(d.x, d.y + 2, DROP_HALO_WORLD * (0.9 + 0.1 * pulse), DROP_HALO_WORLD * 0.4, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 0.18;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+  // Soft pulsing glow.
+  light(ctx, d.x, cy, size * (0.85 + 0.25 * pulse), color, 0.75 + 0.2 * pulse);
+  ctx.save();
+  if (key) {
+    // Power-up: neon orb with a glyph.
+    const r = size * 0.42;
+    ctx.fillStyle = "#0c0e12";
+    ctx.beginPath();
+    ctx.arc(d.x, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.font = `bold ${Math.round(r * 1.25)}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(POWER_GLYPH[key], d.x, cy + 1);
+  } else {
+    // Gear / weapon: framed gold plate with its item icon.
+    const half = size * 0.5;
+    ctx.fillStyle = "#1a140c";
+    ctx.fillRect(d.x - half, cy - half, size, size);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = GEAR_HEX;
+    ctx.strokeRect(d.x - half, cy - half, size, size);
+    const icon = d.kind === "gear" && d.gear ? d.gear.slot : d.weapon ? d.weapon.kind : "helm";
+    ensureIcons();
+    drawIcon(ctx, icon, d.x - half + 4, cy - half + 4, size - 8);
+  }
+  ctx.restore();
+}
+
+function drawPortal(ctx: CanvasRenderingContext2D, game: Game, now: number): void {
+  const p = game.portal;
+  ctx.fillStyle = "#2a2430";
+  ctx.fillRect(p.x - 34, p.y - 48, 68, 64);
+  ctx.fillStyle = "#3a3344";
+  ctx.fillRect(p.x - 28, p.y - 56, 56, 12);
+  const pulse = 0.55 + Math.sin(now * 0.004) * 0.15;
+  light(ctx, p.x, p.y - 10, game.wave >= 5 ? 48 : 30, "rgba(180,90,255,0.9)", pulse);
+  ctx.fillStyle = game.wave >= 5 ? "#1a1024" : "#120e16";
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y - 8, 16, 24, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ebe6da";
+  ctx.font = "12px Outfit, sans-serif";
+  ctx.textAlign = "center";
+  if (game.wave < 5) ctx.fillText("Sealed", p.x, p.y - 64);
+  else {
+    const ratio = Math.max(0, p.hp / p.maxHp);
+    ctx.fillStyle = "#1a140c";
+    ctx.fillRect(p.x - 28, p.y - 70, 56, 5);
+    ctx.fillStyle = "#c46bff";
+    ctx.fillRect(p.x - 28, p.y - 70, 56 * ratio, 5);
+  }
+}
+
+function drawEnemy(ctx: CanvasRenderingContext2D, game: Game, index: number): void {
+  const e = game.enemies[index];
+  if (!e) return;
+  const scale = e.elite ? 3 : 1.35;
+  if (e.flash > 0) ctx.globalAlpha = 0.55;
+  if (e.elite) {
+    ctx.save();
+    ctx.shadowColor = "#e0b15a";
+    ctx.shadowBlur = 14;
+    blit(ctx, e.kind, e.anim, e.facing, e.frame, e.x, e.y, scale);
+    ctx.restore();
+  } else {
+    blit(ctx, e.kind, e.anim, e.facing, e.frame, e.x, e.y, scale);
+  }
+  ctx.globalAlpha = 1;
+  if (e.elite) {
+    ctx.fillStyle = "#ebe6da";
+    ctx.font = "12px Outfit, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(`Elite ${monsterName(e.kind)}`, e.x, e.y - 58 * (e.elite ? 1.6 : 1));
+  }
+  if (e.telegraph > 0) {
+    ctx.strokeStyle = "rgba(210,70,60,0.7)";
+    ctx.beginPath();
+    ctx.moveTo(e.x, e.y);
+    ctx.lineTo(game.player.x, game.player.y);
+    ctx.stroke();
+  }
+}
+
+function drawHero(ctx: CanvasRenderingContext2D, game: Game): void {
+  const p = game.player;
+  if (p.rage > 0) light(ctx, p.x, p.y, 36, "rgba(224,177,90,0.85)", 0.7);
+  const anim = p.jumpT > 0 ? "jump" : "walk";
+  const frame = anim === "walk" ? p.frame : Math.min(3, Math.floor((0.35 - p.jumpT) * 12));
+  blit(ctx, p.actor, anim, p.facing, frame, p.x, p.y, 1.35);
+}
+
+function vignette(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+  const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.2, w / 2, h / 2, Math.max(w, h) * 0.62);
+  g.addColorStop(0, "rgba(0,0,0,0)");
+  g.addColorStop(1, "rgba(0,0,0,0.55)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+}
+
+function drawArrow(ctx: CanvasRenderingContext2D, game: Game, w: number, h: number): void {
+  const sx = (game.portal.x - game.camX) * VIEW_ZOOM + w / 2;
+  const sy = (game.portal.y - game.camY) * VIEW_ZOOM + h / 2;
+  if (sx > 24 && sy > 24 && sx < w - 24 && sy < h - 24) return;
+  const ang = Math.atan2(game.portal.y - game.player.y, game.portal.x - game.player.x);
+  const cx = w / 2 + Math.cos(ang) * Math.min(w, h) * 0.4;
+  const cy = h / 2 + Math.sin(ang) * Math.min(w, h) * 0.34;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(ang);
+  ctx.fillStyle = "#c46bff";
+  ctx.beginPath();
+  ctx.moveTo(12, 0);
+  ctx.lineTo(-8, 7);
+  ctx.lineTo(-8, -7);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function onscreen(game: Game, x: number, y: number, w: number, h: number, pad: number): boolean {
+  return Math.abs(x - game.camX) < w / 2 + pad && Math.abs(y - game.camY) < h / 2 + pad;
+}
