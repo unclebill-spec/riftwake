@@ -1,0 +1,72 @@
+{
+ "bolt": {
+  "row": 0,
+  "frames": 4,
+  "source": "KQ kiblast_projectile"
+ },
+ "beam": {
+  "row": 1,
+  "frames": 6,
+  "source": "HM as_fx rune_beam"
+ },
+ "wave": {
+  "row": 2,
+  "frames": 6,
+  "source": "HM as_fx rune_pulse"
+ },
+ "fire": {
+  "row": 3,
+  "frames": 8,
+  "source": "HM mp_fx fire_wave"
+ },
+ "ice": {
+  "row": 4,
+  "frames": 6,
+  "source": "HM nf_fx ice_lance"
+ },
+ "water": {
+  "row": 5,
+  "frames": 8,
+  "source": "HM as_fx core_pulse"
+ },
+ "enemy": {
+  "row": 6,
+  "frames": 8,
+  "source": "HM mp_fx glow_orb_red"
+ },
+ "hit-bolt": {
+  "row": 7,
+  "frames": 7,
+  "source": "KQ kiblast_impact"
+ },
+ "hit-beam": {
+  "row": 8,
+  "frames": 7,
+  "source": "HM alfheim_fx prism_shatter"
+ },
+ "hit-wave": {
+  "row": 9,
+  "frames": 6,
+  "source": "GW fx2 shadow_impact"
+ },
+ "hit-fire": {
+  "row": 10,
+  "frames": 6,
+  "source": "GW fx2 fire_impact"
+ },
+ "hit-ice": {
+  "row": 11,
+  "frames": 7,
+  "source": "HM stonefrost_impact_iii"
+ },
+ "hit-water": {
+  "row": 12,
+  "frames": 6,
+  "source": "HM verdant_fx waterfall_splash"
+ },
+ "aura-rage": {
+  "row": 13,
+  "frames": 8,
+  "source": "HM mp_fx flame_ward"
+ }
+}

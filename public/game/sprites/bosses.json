@@ -1,0 +1,84 @@
+{
+ "cell": [
+  40,
+  44
+ ],
+ "base": 42,
+ "kinds": {
+  "skeleton": {
+   "row": 0,
+   "game": "Gravewake",
+   "source": "lich-boss"
+  },
+  "orc": {
+   "row": 4,
+   "game": "Gravewake",
+   "source": "goblin-boss"
+  },
+  "zombie": {
+   "row": 8,
+   "game": "Gravewake",
+   "source": "zombie-boss"
+  },
+  "vampire": {
+   "row": 12,
+   "game": "Knight's Quest",
+   "source": "malachar"
+  },
+  "ghost": {
+   "row": 16,
+   "game": "Knight's Quest",
+   "source": "ombrelle"
+  },
+  "minotaur": {
+   "row": 20,
+   "game": "Gravewake",
+   "source": "ghoul-boss"
+  },
+  "satyr": {
+   "row": 24,
+   "game": "Gravewake",
+   "source": "krampus-boss"
+  },
+  "sphinx": {
+   "row": 28,
+   "game": "Knight's Quest",
+   "source": "corvin"
+  },
+  "succubus": {
+   "row": 32,
+   "game": "Gravewake",
+   "source": "witch-boss"
+  },
+  "incubus": {
+   "row": 36,
+   "game": "Knight's Quest",
+   "source": "morvant"
+  },
+  "angel": {
+   "row": 40,
+   "game": "Knight's Quest",
+   "source": "count_aurel"
+  },
+  "spider": {
+   "row": 44,
+   "game": "Knight's Quest",
+   "source": "hollowmere"
+  },
+  "bear": {
+   "row": 48,
+   "game": "Gravewake",
+   "source": "wolf-boss"
+  },
+  "alligator": {
+   "row": 52,
+   "game": "Knight's Quest",
+   "source": "slag_golem"
+  },
+  "tiger": {
+   "row": 56,
+   "game": "Gravewake",
+   "source": "cat-boss"
+  }
+ }
+}

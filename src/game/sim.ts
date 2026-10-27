@@ -47,6 +47,12 @@ const MAX_D = 28;
 const MAX_PART = 160;
 const MAX_B = 12;
 const CELL = 96;
+const MAX_FX = 40;
+/** Seconds an impact burst plays (render-only; never touches combat timing). */
+export const IMPACT_TIME = 0.42;
+
+/** Cosmetic spell impact burst (transient, never saved, no RNG use so sims stay deterministic). */
+export type Impact = { alive: boolean; x: number; y: number; type: ShotType | "enemy"; t: number };
 
 function makeEnemy(): Enemy {
   return {
@@ -127,6 +133,7 @@ export class Game {
   readonly drops: Drop[] = Array.from({ length: MAX_D }, makeDrop);
   readonly parts: Part[] = Array.from({ length: MAX_PART }, makePart);
   readonly beams: Beam[] = Array.from({ length: MAX_B }, makeBeam);
+  readonly impacts: Impact[] = Array.from({ length: MAX_FX }, () => ({ alive: false, x: 0, y: 0, type: "bolt" as ShotType | "enemy", t: 0 }));
   props: Prop[] = [];
   kinds: MonsterId[] = ["skeleton", "orc", "zombie"];
   biome: "rock" | "forest" | "snow" | "ice" | "lava" = "rock";
@@ -455,6 +462,7 @@ export class Game {
     for (const d of this.drops) d.alive = false;
     for (const p of this.parts) p.alive = false;
     for (const b of this.beams) b.alive = false;
+    for (const f of this.impacts) f.alive = false;
     this.buildWorld();
     const t = this.totals();
     this.player.hero = run.hero;
@@ -494,7 +502,12 @@ export class Game {
       if (Math.hypot(x - this.player.x, y - this.player.y) < 170) continue;
       if (Math.hypot(x - this.portal.x, y - this.portal.y) < 200) continue;
       const tree = trees && rng() > 0.45;
-      this.props.push({ x, y, r: tree ? 22 : 16 + rng() * 14, kind: tree ? "tree" : "boulder" });
+      const r = tree ? 22 : 16 + rng() * 14;
+      // Sparse ground props: thin boulders without touching the rng stream, and keep a lane
+      // (>= one elite's width) between any two props so nothing overlaps or pins a body.
+      if (!tree && Math.imul(i + 1, 2654435761) >>> 24 > 150) continue;
+      if (this.props.some((p) => Math.hypot(p.x - x, p.y - y) < p.r + r + 70)) continue;
+      this.props.push({ x, y, r, kind: tree ? "tree" : "boulder" });
     }
     if (this.level === 1) this.kinds = ["skeleton", "orc", "zombie"];
     else {
@@ -903,7 +916,10 @@ export class Game {
     for (let i = 0; i < this.enemies.length; i++) {
       const e = this.enemies[i];
       if (!e?.alive) continue;
-      if (distSeg(e.x, e.y, this.player.x, this.player.y, dx, dy, len) < e.radius + 8) this.hurtEnemy(i, dmg, "beam", dx, dy);
+      if (distSeg(e.x, e.y, this.player.x, this.player.y, dx, dy, len) < e.radius + 8) {
+        this.spawnImpact(e.x, e.y, "beam");
+        this.hurtEnemy(i, dmg, "beam", dx, dy);
+      }
     }
     if (this.wave >= 5 && distSeg(this.portal.x, this.portal.y, this.player.x, this.player.y, dx, dy, len) < this.portal.r + 8) {
       this.portal.hp -= dmg;
@@ -1178,6 +1194,7 @@ export class Game {
       if (this.hitsProp(p.x, p.y, p.radius * 0.4)) {
         p.alive = false;
         this.burst(p.x, p.y, "#9aa0aa", 2);
+        this.spawnImpact(p.x, p.y, p.friendly ? p.type : "enemy");
         continue;
       }
       if (p.friendly) this.friendlyHit(p);
@@ -1185,6 +1202,7 @@ export class Game {
         this.hurt(p.damage);
         p.alive = false;
         this.burst(p.x, p.y, "#d2644a", 4);
+        this.spawnImpact(p.x, p.y, "enemy");
       }
     }
   }
@@ -1195,6 +1213,7 @@ export class Game {
       if (!e?.alive || this.hitAlready(p, j)) continue;
       if (Math.hypot(p.x - e.x, p.y - e.y) > p.radius + e.radius) continue;
       this.markHit(p, j);
+      this.spawnImpact(p.x, p.y, p.type);
       this.hurtEnemy(j, p.damage, p.type, p.vx, p.vy);
       if (p.splash > 0) this.splashAt(e.x, e.y, p.splash, p.damage * 0.45, j);
       const hits = (p.h0 >= 0 ? 1 : 0) + (p.h1 >= 0 ? 1 : 0) + (p.h2 >= 0 ? 1 : 0);
@@ -1387,7 +1406,28 @@ export class Game {
     }
   }
 
+  /** Starts a cosmetic impact burst; reuses the oldest slot when the pool is full. */
+  spawnImpact(x: number, y: number, type: ShotType | "enemy"): void {
+    let slot = this.impacts.find((f) => !f.alive);
+    if (!slot) slot = this.impacts.reduce((a, b) => (b.t > a.t ? b : a));
+    slot.alive = true;
+    slot.x = x;
+    slot.y = y;
+    slot.type = type;
+    slot.t = 0;
+  }
+
+  /** Advances impact bursts (also used by the screenshot harness). */
+  stepFx(dt: number): void {
+    for (const f of this.impacts) {
+      if (!f.alive) continue;
+      f.t += dt;
+      if (f.t >= IMPACT_TIME) f.alive = false;
+    }
+  }
+
   private partsStep(dt: number): void {
+    this.stepFx(dt);
     for (const p of this.parts) {
       if (!p.alive) continue;
       p.life -= dt;

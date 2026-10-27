@@ -1,3 +1,4 @@
+import { PROP_ART } from "./propsheet";
 import { hash2, mulberry32 } from "@/game/rng";
 import type { ActorId, Anim } from "@/game/types";
 
@@ -10,9 +11,7 @@ function browserImage(src: string): HTMLImageElement | null {
 
 const atlasImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/atlas.png?v=9`);
 const iconImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/icons.png`);
-const shotImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/shots.png`);
 // Reused spell FX (Gravewake fx2/gen/wow2): 6 rows x 4 frames of 32x16 art, pointing +x.
-const fxImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/shots-fx.png?v=1`);
 const floorImg: Record<string, HTMLImageElement | null> = {};
 // Reused Gravewake 16 px floor stones at 3x (48 px), darkened ~35%: FLOOR_VARIANTS cells per biome strip.
 const floorVarImg: Record<string, HTMLImageElement | null> = {};
@@ -32,6 +31,151 @@ const propImg: Record<"tree" | "boulder", HTMLImageElement | null> = {
 };
 
 const SHOT_INDEX = ["bolt", "beam", "wave", "fire", "ice", "water"];
+
+// Boss sheet reused from Will's other games (Gravewake big bosses, Knight's Quest chars), built by
+// tools/build_bosses.py: 40x44 art cells, feet on row BOSS_BASE, cols walk0-3/cast0-2/jump0-3,
+// rows kind*4 + (0 up, 1 right, 2 down, 3 left). bosses-rim.png is the matching 1 px gold outline.
+const bossImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/bosses.png?v=1`);
+const bossRimImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/bosses-rim.png?v=1`);
+const BOSS_W = 40;
+const BOSS_H = 44;
+const BOSS_BASE = 42;
+const BOSS_ORDER = ["skeleton", "orc", "zombie", "vampire", "ghost", "minotaur", "satyr", "sphinx", "succubus", "incubus", "angel", "spider", "bear", "alligator", "tiger"];
+/** Kinds that always use their boss sprite (the specials); every elite uses one too. */
+export const SPECIAL_KINDS = new Set(["vampire", "ghost", "minotaur", "satyr", "sphinx", "angel", "spider", "tiger"]);
+// 8-way facing (N,NE,E,SE,S,SW,W,NW) -> sheet row (up, right, down, left).
+const BOSS_FACE = [0, 1, 1, 1, 2, 3, 3, 3];
+const BOSS_COL: Record<Anim, number> = { walk: 0, cast: 4, jump: 7 };
+
+// Spell FX reused from Hearthmoor gamefx, Knight's Quest fx and Gravewake fx2 (tools/build_spellfx.py):
+// 48x48 art cells x 8 frames. Rows 0-5 projectiles (SHOT_INDEX order), 6 enemy shot, 7-12 impacts, 13 rage aura.
+const spellImg = browserImage(`${import.meta.env.BASE_URL}game/sprites/spell-fx.png?v=2`);
+const SPELL = 48;
+export const IMPACT_FRAMES = [7, 7, 6, 6, 7, 8];
+const IMPACT_ENEMY_ROW = 10; // enemy shots splash with the fire burst
+export function spellReady(): boolean {
+  return !!spellImg?.complete && (spellImg?.naturalWidth ?? 0) > 0;
+}
+
+/** Projectile frame for a shot type ("enemy" for hostile shots), `perArt` screen px per art px. */
+export function drawSpell(ctx: CanvasRenderingContext2D, type: string, x: number, y: number, angle: number, f: number, perArt: number): void {
+  if (!spellImg || !spellReady()) return;
+  const row = type === "enemy" ? 6 : Math.max(0, SHOT_INDEX.indexOf(type));
+  spellCell(ctx, row, f & 7, x, y, angle, perArt);
+}
+
+/** Impact burst for a shot type at progress t (0..1). */
+export function drawImpact(ctx: CanvasRenderingContext2D, type: string, x: number, y: number, t: number, perArt: number): void {
+  if (!spellImg || !spellReady()) return;
+  const i = SHOT_INDEX.indexOf(type);
+  const row = i < 0 ? IMPACT_ENEMY_ROW : 7 + i;
+  const n = i < 0 ? 6 : (IMPACT_FRAMES[i] ?? 6);
+  spellCell(ctx, row, Math.min(n - 1, Math.floor(t * n)), x, y, 0, perArt);
+}
+
+/** Looping hero aura (rage buff) centred on (x, y): HM mp_fx flame_ward, spell row 13. */
+export function drawAura(ctx: CanvasRenderingContext2D, x: number, y: number, f: number, perArt: number): void {
+  if (!spellImg || !spellReady()) return;
+  spellCell(ctx, 13, f & 7, x, y, 0, perArt);
+}
+
+function spellCell(ctx: CanvasRenderingContext2D, row: number, col: number, x: number, y: number, angle: number, perArt: number): void {
+  if (!spellImg) return;
+  const m = ctx.getTransform();
+  const k = Math.max(1, Math.round(perArt));
+  const size = SPELL * k;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, Math.round(m.a * x + m.c * y + m.e), Math.round(m.b * x + m.d * y + m.f));
+  ctx.imageSmoothingEnabled = false;
+  if (angle) ctx.rotate(angle);
+  ctx.drawImage(spellImg, col * SPELL, row * SPELL, SPELL, SPELL, -size / 2, -size / 2, size, size);
+  ctx.restore();
+}
+
+/** Tiles the reused beam strip (spell row 1) along a hitscan beam, `perArt` screen px per art px. */
+export function drawSpellBeam(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number, len: number, f: number, perArt: number): boolean {
+  if (!spellImg || !spellReady()) return false;
+  const m = ctx.getTransform();
+  const zoom = Math.hypot(m.a, m.b) || 1;
+  const k = Math.max(1, Math.round(perArt));
+  const screenLen = len * zoom;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, Math.round(m.a * x + m.c * y + m.e), Math.round(m.b * x + m.d * y + m.f));
+  ctx.rotate(angle);
+  ctx.imageSmoothingEnabled = false;
+  const seg = SPELL * k;
+  for (let d = 0; d < screenLen; d += seg) {
+    const w = Math.min(seg, screenLen - d);
+    ctx.drawImage(spellImg, (f & 7) * SPELL, SPELL, w / k, SPELL, d, -seg / 2, w, seg);
+  }
+  ctx.restore();
+  return true;
+}
+
+// Ground: seamless 256 art px textures per biome built from Hearthmoor texel tiles (tools/build_terrain.py).
+const groundImg: Record<string, HTMLImageElement | null> = {};
+for (const id of ["rock", "forest", "snow", "ice", "lava", "lavaflow"]) groundImg[id] = browserImage(`${import.meta.env.BASE_URL}game/sprites/ground-${id}.png?v=1`);
+const groundPat = new Map<string, CanvasPattern>();
+
+/**
+ * Fills world rect (x, y, w, h) with the biome ground, drawn in screen space at a whole number of screen px
+ * per art px (`worldPerArt` world px per art px before rounding) anchored to world 0,0 so it never swims.
+ */
+export function drawGround(ctx: CanvasRenderingContext2D, id: string, x: number, y: number, w: number, h: number, worldPerArt: number): boolean {
+  const img = groundImg[id];
+  if (!img?.complete || img.naturalWidth === 0) return false;
+  let pat = groundPat.get(id);
+  if (!pat) {
+    const made = ctx.createPattern(img, "repeat");
+    if (!made) return false;
+    pat = made;
+    groundPat.set(id, pat);
+  }
+  const m = ctx.getTransform();
+  const zoom = Math.hypot(m.a, m.b) || 1;
+  const k = Math.max(1, Math.round(zoom * worldPerArt));
+  const ox = Math.round(m.e);
+  const oy = Math.round(m.f);
+  pat.setTransform(new DOMMatrix([k, 0, 0, k, ox, oy]));
+  const sx = Math.round(m.a * x + m.e);
+  const sy = Math.round(m.d * y + m.f);
+  const ex = Math.round(m.a * (x + w) + m.e);
+  const ey = Math.round(m.d * (y + h) + m.f);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = pat;
+  ctx.fillRect(sx, sy, ex - sx, ey - sy);
+  ctx.restore();
+  return true;
+}
+
+export function hasBoss(kind: string): boolean {
+  return BOSS_ORDER.includes(kind) && !!bossImg?.complete && (bossImg?.naturalWidth ?? 0) > 0;
+}
+
+/** Pixel-snapped boss draw: `perArt` screen px per art px (integer), feet at world (dx, dy). */
+export function blitBoss(ctx: CanvasRenderingContext2D, kind: string, anim: Anim, facing: number, frame: number, dx: number, dy: number, perArt: number, rim: boolean): void {
+  if (!bossImg) return;
+  const ki = BOSS_ORDER.indexOf(kind);
+  if (ki < 0) return;
+  const count = FRAMES[anim];
+  const f = ((frame % count) + count) % count;
+  const sx = (BOSS_COL[anim] + f) * BOSS_W;
+  const sy = (ki * 4 + (BOSS_FACE[((facing % 8) + 8) % 8] ?? 2)) * BOSS_H;
+  const m = ctx.getTransform();
+  const k = Math.max(1, Math.round(perArt));
+  const cx = Math.round(m.a * dx + m.c * dy + m.e);
+  const cy = Math.round(m.b * dx + m.d * dy + m.f);
+  const x = cx - (BOSS_W / 2) * k;
+  const y = cy - BOSS_BASE * k;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  if (rim && bossRimImg?.complete && bossRimImg.naturalWidth > 0) ctx.drawImage(bossRimImg, sx, sy, BOSS_W, BOSS_H, x, y, BOSS_W * k, BOSS_H * k);
+  ctx.drawImage(bossImg, sx, sy, BOSS_W, BOSS_H, x, y, BOSS_W * k, BOSS_H * k);
+  ctx.restore();
+}
 
 export function whenIcons(cb: () => void): void {
   if (!iconImg) return;
@@ -61,47 +205,6 @@ export function drawPropSprite(ctx: CanvasRenderingContext2D, kind: "tree" | "bo
   const img = propImg[kind];
   if (!img?.complete || img.naturalWidth === 0) return false;
   ctx.drawImage(img, Math.round(x - size / 2), Math.round(y - size / 2), size, size);
-  return true;
-}
-
-/**
- * Animated reused spell FX: frame `f` of the type's row, rotated to the travel angle, each art
- * pixel drawn as `px` world px (nearest). Falls back to the old static cell while loading.
- */
-export function drawShotFx(ctx: CanvasRenderingContext2D, type: string, x: number, y: number, angle: number, f: number, px: number): boolean {
-  const row = SHOT_INDEX.indexOf(type);
-  if (row < 0 || !fxImg?.complete || fxImg.naturalWidth === 0) return drawShotSprite(ctx, type, x, y, 28);
-  ctx.save();
-  ctx.imageSmoothingEnabled = false;
-  ctx.translate(Math.round(x), Math.round(y));
-  ctx.rotate(angle);
-  // The front of each projectile sits at the right edge of its cell; centre the head on (x, y).
-  ctx.drawImage(fxImg, (f & 3) * 32, row * 16, 32, 16, -24 * px, -8 * px, 32 * px, 16 * px);
-  ctx.restore();
-  return true;
-}
-
-/** Tiles the reused beam strip (row 1) along a hitscan beam from (x, y) in direction `angle`. */
-export function drawBeamFx(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number, len: number, f: number, px: number): boolean {
-  if (!fxImg?.complete || fxImg.naturalWidth === 0) return false;
-  ctx.save();
-  ctx.imageSmoothingEnabled = false;
-  ctx.translate(Math.round(x), Math.round(y));
-  ctx.rotate(angle);
-  const seg = 32 * px;
-  for (let d = 0; d < len; d += seg) {
-    const w = Math.min(seg, len - d);
-    ctx.drawImage(fxImg, (f & 3) * 32, 16, w / px, 16, d, -8 * px, w, 16 * px);
-  }
-  ctx.restore();
-  return true;
-}
-
-export function drawShotSprite(ctx: CanvasRenderingContext2D, type: string, x: number, y: number, size: number): boolean {
-  if (!shotImg?.complete || shotImg.naturalWidth === 0) return false;
-  const i = SHOT_INDEX.indexOf(type);
-  if (i < 0) return false;
-  ctx.drawImage(shotImg, i * 32, 0, 32, 32, Math.round(x - size / 2), Math.round(y - size / 2), size, size);
   return true;
 }
 
@@ -631,4 +734,33 @@ export function floorDetail(seed: number, biome: string, arena: number, cell: nu
   ctx.putImageData(out, 0, 0);
   detailCache = { key, canvas };
   return canvas;
+}
+
+// Reused ground props (tools/build_props.py): crystals, gravestones, glowing mushrooms, ruins.
+const propSheet = typeof Image === "undefined" ? undefined : Object.assign(new Image(), { src: `${import.meta.env.BASE_URL}game/sprites/props.png?v=1` });
+
+/** Draw the reused prop for a boulder at (x, y) with collision radius r; base sits on the circle's foot. */
+export function drawGroundProp(ctx: CanvasRenderingContext2D, biome: string, x: number, y: number, r: number): boolean {
+  if (!propSheet?.complete || propSheet.naturalWidth === 0) return false;
+  const cls = r < 22 ? "s" : "l";
+  let pool = PROP_ART.filter((p) => p.cls === cls && p.biomes.includes(biome));
+  if (!pool.length) pool = PROP_ART.filter((p) => p.biomes.includes(biome));
+  if (!pool.length) return false;
+  const h = (Math.imul(Math.round(x) * 73856093 ^ Math.round(y) * 19349663, 2654435761) >>> 0) % pool.length;
+  const a = pool[h];
+  const t = ctx.getTransform();
+  const sx = Math.round(t.a * x + t.e);
+  const sy = Math.round(t.d * (y + r * 0.5) + t.f);
+  const w = a.w * a.k, hh = a.h * a.k;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.beginPath();
+  ctx.ellipse(sx, sy - 1, w * 0.42, Math.max(2, w * 0.12), 0, 0, Math.PI * 2);
+  ctx.fill();
+  if (a.glow) { ctx.shadowColor = a.glow; ctx.shadowBlur = 12; }
+  ctx.drawImage(propSheet, a.x, a.y, a.w, a.h, sx - Math.floor(w / 2), sy - hh, w, hh);
+  ctx.restore();
+  return true;
 }

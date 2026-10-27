@@ -1,15 +1,23 @@
-import { ARENA_SIZE, PLUS_TIME, type Game } from "@/game/sim";
+import { ARENA_SIZE, IMPACT_TIME, PLUS_TIME, type Game } from "@/game/sim";
 import {
   blit,
-  drawBeamFx,
   drawFloorTile,
   floorDetail,
   FLOOR_DETAIL_PX,
   drawIcon,
   drawPropSprite,
-  drawShotFx,
+  drawGroundProp,
   ensureIcons,
   FLOOR_VARIANT_RATE,
+  SPECIAL_KINDS,
+  blitBoss,
+  hasBoss,
+  drawSpell,
+  drawSpellBeam,
+  drawImpact,
+  drawAura,
+  spellReady,
+  drawGround,
 } from "@/game/sprites";
 import { hash2 } from "@/game/rng";
 import type { ShotType } from "@/game/types";
@@ -116,24 +124,19 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
   for (let i = 0; i < n; i++) {
     const item = sortBuf[i];
     if (!item || item.y > 1e8) break;
-    if (item.k === 0) drawProp(ctx, game.props[item.i]);
+    if (item.k === 0) drawProp(ctx, game.props[item.i], game.biome);
     else if (item.k === 2) drawDrop(ctx, game, item.i, now);
     else if (item.k === 4) drawPortal(ctx, game, now);
     else if (item.k === 1) drawEnemy(ctx, game, item.i);
     else drawHero(ctx, game);
   }
   ctx.globalCompositeOperation = "lighter";
-  const fxFrame = Math.floor(now / 90) & 3;
+  const spellFrame = Math.floor(now / 80) & 7;
+  const spells = spellReady();
   for (const b of game.beams) {
     if (!b.alive) continue;
     ctx.globalAlpha = Math.max(0.3, b.life / 0.12);
-    const fxOk = drawBeamFx(ctx, b.x, b.y, Math.atan2(b.dy, b.dx), b.len, fxFrame, 2);
-    ctx.strokeStyle = SHOT.beam;
-    ctx.lineWidth = fxOk ? 2 : 4;
-    ctx.beginPath();
-    ctx.moveTo(b.x, b.y);
-    ctx.lineTo(b.x + b.dx * b.len, b.y + b.dy * b.len);
-    ctx.stroke();
+    drawSpellBeam(ctx, b.x, b.y, Math.atan2(b.dy, b.dx), b.len, spellFrame, 2);
     light(ctx, b.x + b.dx * b.len * 0.5, b.y + b.dy * b.len * 0.5, 36, SHOT.beam, 0.8);
   }
   for (const p of game.projs) {
@@ -141,22 +144,15 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
     const color = p.friendly ? SHOT[p.type] : "rgba(255,70,60,0.95)";
     const r = p.type === "wave" ? 46 : p.type === "beam" ? 18 : p.type === "fire" ? 28 : 22;
     light(ctx, p.x, p.y, r, color, 1);
-    if (p.friendly) {
-      // Wave ripples face their wavefront across the travel line.
-      const ang = Math.atan2(p.vy, p.vx) + (p.type === "wave" ? Math.PI / 2 : 0);
-      drawShotFx(ctx, p.type, p.x, p.y, ang, fxFrame, 2);
-    }
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = p.type === "wave" ? 7 : 4;
-    ctx.beginPath();
-    const mag = Math.hypot(p.vx, p.vy) || 1;
-    ctx.moveTo(p.x - (p.vx / mag) * 16, p.y - (p.vy / mag) * 16);
-    ctx.lineTo(p.x + (p.vx / mag) * 6, p.y + (p.vy / mag) * 6);
-    ctx.stroke();
-    ctx.strokeStyle = "#f4fbff";
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // Reused HM/KQ spell art only (no old Riftwake shot art or streak fallback), 2 screen px per art px.
+    if (spells) drawSpell(ctx, p.friendly ? p.type : "enemy", p.x, p.y, Math.atan2(p.vy, p.vx), spellFrame, 2);
+  }
+  ctx.globalAlpha = 1;
+  for (const f of game.impacts) {
+    if (!f.alive) continue;
+    const t = f.t / IMPACT_TIME;
+    light(ctx, f.x, f.y, 40, f.type === "enemy" ? "rgba(255,70,60,0.95)" : SHOT[f.type], 1 - t);
+    drawImpact(ctx, f.type, f.x, f.y, t, 2);
   }
   for (const p of game.parts) {
     if (!p.alive) continue;
@@ -204,6 +200,24 @@ function drawFloor(game: Game, ctx: CanvasRenderingContext2D, w: number, h: numb
   const y0 = Math.floor((game.camY - h / 2) / TILE) - 1;
   const x1 = Math.floor((game.camX + w / 2) / TILE) + 2;
   const y1 = Math.floor((game.camY + h / 2) / TILE) + 2;
+  // Reused Hearthmoor ground (dark neon recolour): one seamless texture, lava cells in the hot variant.
+  const gx = Math.max(0, x0 * TILE);
+  const gy = Math.max(0, y0 * TILE);
+  const gw = Math.min(ARENA_SIZE, (x1 + 1) * TILE) - gx;
+  const gh = Math.min(ARENA_SIZE, (y1 + 1) * TILE) - gy;
+  if (gw > 0 && gh > 0 && drawGround(ctx, game.biome, gx, gy, gw, gh, 3)) {
+    for (let cy = y0; cy <= y1; cy++) {
+      for (let cx = x0; cx <= x1; cx++) {
+        const px = cx * TILE;
+        const py = cy * TILE;
+        if (px < 0 || py < 0 || px >= ARENA_SIZE || py >= ARENA_SIZE) continue;
+        if (!game.lavaAt(px + 8, py + 8)) continue;
+        drawGround(ctx, "lavaflow", px, py, TILE, TILE, 3);
+        light(ctx, px + TILE / 2, py + TILE / 2, 30, "rgba(255,110,40,0.9)", 0.7);
+      }
+    }
+    return;
+  }
   for (let cy = y0; cy <= y1; cy++) {
     for (let cx = x0; cx <= x1; cx++) {
       const px = cx * TILE;
@@ -236,8 +250,9 @@ function drawFloor(game: Game, ctx: CanvasRenderingContext2D, w: number, h: numb
   }
 }
 
-function drawProp(ctx: CanvasRenderingContext2D, prop: { x: number; y: number; r: number; kind: "tree" | "boulder" } | undefined): void {
+function drawProp(ctx: CanvasRenderingContext2D, prop: { x: number; y: number; r: number; kind: "tree" | "boulder" } | undefined, biome = "rock"): void {
   if (!prop) return;
+  if (prop.kind === "boulder" && drawGroundProp(ctx, biome, prop.x, prop.y, prop.r)) return;
   if (drawPropSprite(ctx, prop.kind, prop.x, prop.y, prop.r * 2.4)) return;
   if (prop.kind === "tree") {
     ctx.fillStyle = "#2a2118";
@@ -344,7 +359,19 @@ function drawEnemy(ctx: CanvasRenderingContext2D, game: Game, index: number): vo
   if (!e) return;
   const scale = e.elite ? 3 : 1.35;
   if (e.flash > 0) ctx.globalAlpha = 0.55;
-  if (e.elite) {
+  const zoom = Math.hypot(ctx.getTransform().a, ctx.getTransform().b) || 1;
+  const boss = (e.elite || SPECIAL_KINDS.has(e.kind)) && hasBoss(e.kind);
+  // Boss art from Will's other games; feet sit a little below the body centre, like the atlas sprites.
+  const feet = e.y + e.radius * 0.7;
+  if (boss && e.elite) {
+    ctx.save();
+    ctx.shadowColor = "#e0b15a";
+    ctx.shadowBlur = 14;
+    blitBoss(ctx, e.kind, e.anim, e.facing, e.frame, e.x, feet, Math.max(2, Math.round(zoom * 5.2)), true);
+    ctx.restore();
+  } else if (boss) {
+    blitBoss(ctx, e.kind, e.anim, e.facing, e.frame, e.x, feet, Math.max(1, Math.round(zoom * 3.4)), false);
+  } else if (e.elite) {
     ctx.save();
     ctx.shadowColor = "#e0b15a";
     ctx.shadowBlur = 14;
@@ -358,7 +385,9 @@ function drawEnemy(ctx: CanvasRenderingContext2D, game: Game, index: number): vo
     ctx.fillStyle = "#ebe6da";
     ctx.font = "12px Outfit, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(`Elite ${monsterName(e.kind)}`, e.x, e.y - 58 * (e.elite ? 1.6 : 1));
+    // Boss elites: label just above the tallest boss cell (37 art px of 44 above the feet).
+    const labelY = boss ? feet - (38 * Math.max(2, Math.round(zoom * 5.2))) / zoom - 4 : e.y - 58 * 1.6;
+    ctx.fillText(`Elite ${monsterName(e.kind)}`, e.x, labelY);
   }
   if (e.telegraph > 0) {
     ctx.strokeStyle = "rgba(210,70,60,0.7)";
@@ -371,7 +400,10 @@ function drawEnemy(ctx: CanvasRenderingContext2D, game: Game, index: number): vo
 
 function drawHero(ctx: CanvasRenderingContext2D, game: Game): void {
   const p = game.player;
-  if (p.rage > 0) light(ctx, p.x, p.y, 36, "rgba(224,177,90,0.85)", 0.7);
+  if (p.rage > 0) {
+    light(ctx, p.x, p.y, 36, "rgba(224,177,90,0.85)", 0.7);
+    drawAura(ctx, p.x, p.y + 4, Math.floor(performance.now() / 80), 2);
+  }
   const anim = p.jumpT > 0 ? "jump" : "walk";
   const frame = anim === "walk" ? p.frame : Math.min(3, Math.floor((0.35 - p.jumpT) * 12));
   blit(ctx, p.actor, anim, p.facing, frame, p.x, p.y, 1.35);
