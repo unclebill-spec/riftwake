@@ -12,6 +12,8 @@ import {
   FLOOR_VARIANT_RATE,
   SPECIAL_KINDS,
   blitBoss,
+  setGlow,
+  setTint,
   hasBoss,
   drawSpell,
   drawSpellBeam,
@@ -184,23 +186,32 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
   if (dark) {
     // Darkness twist: dim the world except a clear pool around the hero, then redraw every
     // on-screen monster on top (dimmed, with a 1 px neon rim) so they still read as monsters.
-    const g = ctx.createRadialGradient(game.player.x, game.player.y, DARK.clearR, game.player.x, game.player.y, DARK.fadeR);
-    g.addColorStop(0, "rgba(2,3,10,0)");
-    g.addColorStop(1, `rgba(2,3,10,${DARK.alpha})`);
-    ctx.fillStyle = g;
-    ctx.fillRect(game.camX - worldW / 2 - 40, game.camY - worldH / 2 - 40, worldW + 80, worldH + 80);
+    // Gradient built once around (0,0) and reused; translated to the hero each frame.
+    darkGrad ??= ctx.createRadialGradient(0, 0, DARK.clearR, 0, 0, DARK.fadeR);
+    if (!darkGradInit) {
+      darkGrad.addColorStop(0, "rgba(2,3,10,0)");
+      darkGrad.addColorStop(1, `rgba(2,3,10,${DARK.alpha})`);
+      darkGradInit = true;
+    }
+    ctx.save();
+    ctx.translate(game.player.x, game.player.y);
+    ctx.fillStyle = darkGrad;
+    ctx.fillRect(game.camX - worldW / 2 - 40 - game.player.x, game.camY - worldH / 2 - 40 - game.player.y, worldW + 80, worldH + 80);
+    ctx.restore();
     for (const e of game.enemies) {
       if (!e.alive || !onscreen(game, e.x, e.y, worldW, worldH, 80)) continue;
       const d = Math.hypot(e.x - game.player.x, e.y - game.player.y);
       if (d < DARK.clearR) continue;
       ctx.save();
-      ctx.filter = e.elite ? "brightness(0) invert(1) sepia(1) saturate(4)" : "brightness(0) invert(1) sepia(1) saturate(6) hue-rotate(270deg)";
+      // Cached tinted silhouettes (sprites.ts tintCell): same filter, applied once per cell instead of per draw.
+      setTint(e.elite ? "gold" : "pink");
       ctx.globalAlpha = 0.85;
       for (const [ox, oy] of RIM) {
         ctx.translate(ox, oy);
         drawEnemyBody(ctx, game, e, true);
         ctx.translate(-ox, -oy);
       }
+      setTint(null);
       ctx.restore();
       ctx.save();
       ctx.globalAlpha = DARK.spriteAlpha;
@@ -460,9 +471,10 @@ function drawEnemy(ctx: CanvasRenderingContext2D, game: Game, index: number): vo
   if (e.flash > 0) {
     // White hit flash: same sprite redrawn as a solid white silhouette (hard alpha kept).
     ctx.save();
-    ctx.filter = "brightness(0) invert(1)";
+    setTint("white");
     ctx.globalAlpha = 0.9;
     drawEnemyBody(ctx, game, e, true);
+    setTint(null);
     ctx.restore();
   }
   drawEnemyExtras(ctx, game, e);
@@ -475,28 +487,23 @@ function drawEnemyBody(ctx: CanvasRenderingContext2D, game: Game, e: Game["enemi
   // Boss art from Will's other games; feet sit a little below the body centre, like the atlas sprites.
   const feet = e.y + e.radius * 0.7;
   if (boss && e.elite) {
-    ctx.save();
-    ctx.shadowColor = "#e0b15a";
-    ctx.shadowBlur = flat ? 0 : 14;
+    setGlow("#e0b15a", flat ? 0 : 14);
     blitBoss(ctx, e.kind, e.anim, e.facing, e.frame, e.x, feet, Math.max(2, Math.round(zoom * 5.2)), true);
-    ctx.restore();
+    setGlow(null);
   } else if (boss) {
     blitBoss(ctx, e.kind, e.anim, e.facing, e.frame, e.x, feet, Math.max(1, Math.round(zoom * 3.4)), false);
   } else if (e.elite) {
-    ctx.save();
-    ctx.shadowColor = "#e0b15a";
-    ctx.shadowBlur = flat ? 0 : 14;
+    setGlow("#e0b15a", flat ? 0 : 14);
     blit(ctx, e.kind, e.anim, e.facing, e.frame, e.x, e.y, scale);
-    ctx.restore();
+    setGlow(null);
   } else if (flat) {
     blit(ctx, e.kind, e.anim, e.facing, e.frame, e.x, e.y, scale);
   } else {
     // Readability: faint cool dark-neon under-glow so small brown/grey grunts separate from the floor's crack lines.
-    ctx.save();
-    ctx.shadowColor = "rgba(70, 225, 255, 0.55)";
-    ctx.shadowBlur = 5;
+    // Pre-shadowed cell from the sprite cache (no live shadowBlur per frame).
+    setGlow("rgba(70, 225, 255, 0.55)", 5);
     blit(ctx, e.kind, e.anim, e.facing, e.frame, e.x, e.y, scale);
-    ctx.restore();
+    setGlow(null);
   }
 }
 
@@ -558,6 +565,8 @@ function drawShrine(ctx: CanvasRenderingContext2D, game: Game, now: number): voi
 }
 
 /** Darkness twist look (BALANCE.md): clear pool around the hero, dim beyond, monsters redrawn with a neon rim. */
+let darkGrad: CanvasGradient | null = null;
+let darkGradInit = false;
 const DARK = { clearR: 120, fadeR: 200, alpha: 0.62, spriteAlpha: 0.8 };
 const RIM: [number, number][] = [[-1.5, 0], [1.5, 0], [0, -1.5], [0, 1.5]];
 

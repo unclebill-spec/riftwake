@@ -155,6 +155,67 @@ export function hasBoss(kind: string): boolean {
 }
 
 /** Pixel-snapped boss draw: `perArt` screen px per art px (integer), feet at world (dx, dy). */
+/** Silhouette tints used by the Darkness rim and the hit flash (same filter strings as before). */
+export type Tint = "pink" | "gold" | "white";
+const TINT_FILTER: Record<Tint, string> = {
+  gold: "brightness(0) invert(1) sepia(1) saturate(4)",
+  pink: "brightness(0) invert(1) sepia(1) saturate(6) hue-rotate(270deg)",
+  white: "brightness(0) invert(1)",
+};
+let curTint: Tint | null = null;
+/** While set, blit/blitBoss draw a cached tinted silhouette instead of the plain cell (no per-frame ctx.filter). */
+export function setTint(t: Tint | null): void {
+  curTint = t;
+}
+const tintCells = new Map<string, HTMLCanvasElement>();
+/** One small canvas per (sheet, cell, tint), filtered once on first use. */
+function tintCell(img: HTMLImageElement, sheet: string, sx: number, sy: number, w: number, h: number, t: Tint): HTMLCanvasElement {
+  const key = `${sheet}|${sx}|${sy}|${t}`;
+  let c = tintCells.get(key);
+  if (c) return c;
+  c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const x = c.getContext("2d");
+  if (x) {
+    x.imageSmoothingEnabled = false;
+    x.filter = TINT_FILTER[t];
+    x.drawImage(img, sx, sy, w, h, 0, 0, w, h);
+  }
+  tintCells.set(key, c);
+  return c;
+}
+
+let glowColor: string | null = null;
+let glowBlur = 0;
+/** While set (and no tint), blit/blitBoss draw a cached pre-shadowed cell instead of using a live shadowBlur. */
+export function setGlow(color: string | null, blur = 0): void {
+  glowColor = blur > 0 ? color : null;
+  glowBlur = blur;
+}
+const glowCells = new Map<string, HTMLCanvasElement>();
+/** Cell drawn at its final screen size with the shadow baked in; `pad` px of margin on every side. */
+function glowCell(key: string, w: number, h: number, draw: (x: CanvasRenderingContext2D, pad: number) => void): [HTMLCanvasElement, number] {
+  const pad = Math.ceil(glowBlur * 2) + 2;
+  const k = `${key}|${w}|${h}|${glowColor}|${glowBlur}`;
+  let c = glowCells.get(k);
+  if (!c) {
+    if (glowCells.size > 2000) glowCells.clear();
+    c = document.createElement("canvas");
+    c.width = w + pad * 2;
+    c.height = h + pad * 2;
+    const x = c.getContext("2d");
+    if (x) {
+      x.imageSmoothingEnabled = false;
+      x.shadowColor = glowColor ?? "transparent";
+      x.shadowBlur = glowBlur;
+      draw(x, pad);
+    }
+    glowCells.set(k, c);
+  }
+  return [c, pad];
+}
+
 export function blitBoss(ctx: CanvasRenderingContext2D, kind: string, anim: Anim, facing: number, frame: number, dx: number, dy: number, perArt: number, rim: boolean): void {
   if (!bossImg) return;
   const ki = BOSS_ORDER.indexOf(kind);
@@ -172,8 +233,24 @@ export function blitBoss(ctx: CanvasRenderingContext2D, kind: string, anim: Anim
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.imageSmoothingEnabled = false;
-  if (rim && bossRimImg?.complete && bossRimImg.naturalWidth > 0) ctx.drawImage(bossRimImg, sx, sy, BOSS_W, BOSS_H, x, y, BOSS_W * k, BOSS_H * k);
-  ctx.drawImage(bossImg, sx, sy, BOSS_W, BOSS_H, x, y, BOSS_W * k, BOSS_H * k);
+  if (glowColor && !curTint) {
+    const rimImg = rim && bossRimImg?.complete && bossRimImg.naturalWidth > 0 ? bossRimImg : null;
+    const img = bossImg;
+    const [c, pad] = glowCell(`boss|${sx}|${sy}|${rimImg ? 1 : 0}`, BOSS_W * k, BOSS_H * k, (g, p) => {
+      if (rimImg) g.drawImage(rimImg, sx, sy, BOSS_W, BOSS_H, p, p, BOSS_W * k, BOSS_H * k);
+      g.drawImage(img, sx, sy, BOSS_W, BOSS_H, p, p, BOSS_W * k, BOSS_H * k);
+    });
+    ctx.shadowColor = "transparent";
+    ctx.drawImage(c, x - pad, y - pad);
+    ctx.restore();
+    return;
+  }
+  if (rim && bossRimImg?.complete && bossRimImg.naturalWidth > 0) {
+    if (curTint) ctx.drawImage(tintCell(bossRimImg, "bossrim", sx, sy, BOSS_W, BOSS_H, curTint), 0, 0, BOSS_W, BOSS_H, x, y, BOSS_W * k, BOSS_H * k);
+    else ctx.drawImage(bossRimImg, sx, sy, BOSS_W, BOSS_H, x, y, BOSS_W * k, BOSS_H * k);
+  }
+  if (curTint) ctx.drawImage(tintCell(bossImg, "boss", sx, sy, BOSS_W, BOSS_H, curTint), 0, 0, BOSS_W, BOSS_H, x, y, BOSS_W * k, BOSS_H * k);
+  else ctx.drawImage(bossImg, sx, sy, BOSS_W, BOSS_H, x, y, BOSS_W * k, BOSS_H * k);
   ctx.restore();
 }
 
@@ -539,7 +616,13 @@ export function blit(
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(atlasImg, sx, sy, CELL, CELL, Math.round(cx - size / 2), Math.round(cy - size / 2), size, size);
+  if (glowColor && !curTint) {
+    const img = atlasImg;
+    const [c, pad] = glowCell(`atlas|${sx}|${sy}`, size, size, (g, p) => g.drawImage(img, sx, sy, CELL, CELL, p, p, size, size));
+    ctx.shadowColor = "transparent";
+    ctx.drawImage(c, Math.round(cx - size / 2) - pad, Math.round(cy - size / 2) - pad);
+  } else if (curTint) ctx.drawImage(tintCell(atlasImg, "atlas", sx, sy, CELL, CELL, curTint), 0, 0, CELL, CELL, Math.round(cx - size / 2), Math.round(cy - size / 2), size, size);
+  else ctx.drawImage(atlasImg, sx, sy, CELL, CELL, Math.round(cx - size / 2), Math.round(cy - size / 2), size, size);
   ctx.restore();
 }
 
