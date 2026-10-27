@@ -740,6 +740,29 @@ export function floorDetail(seed: number, biome: string, arena: number, cell: nu
 const propSheet = typeof Image === "undefined" ? undefined : Object.assign(new Image(), { src: `${import.meta.env.BASE_URL}game/sprites/props.png?v=1` });
 
 /** Draw the reused prop for a boulder at (x, y) with collision radius r; base sits on the circle's foot. */
+/** Draws one named prop-sheet sprite standing on (x, y) with a pulsing glow (rift shrines). */
+export function drawNamedProp(ctx: CanvasRenderingContext2D, name: string, x: number, y: number, glow: string, pulse: number): boolean {
+  if (!propSheet?.complete || propSheet.naturalWidth === 0) return false;
+  const a = PROP_ART.find((p) => p.name === name);
+  if (!a) return false;
+  const t = ctx.getTransform();
+  const sx = Math.round(t.a * x + t.e);
+  const sy = Math.round(t.d * y + t.f);
+  const w = a.w * a.k, hh = a.h * a.k;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.beginPath();
+  ctx.ellipse(sx, sy - 1, w * 0.42, Math.max(2, w * 0.12), 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = 10 + pulse * 10;
+  ctx.drawImage(propSheet, a.x, a.y, a.w, a.h, sx - Math.floor(w / 2), sy - hh, w, hh);
+  ctx.restore();
+  return true;
+}
+
 export function drawGroundProp(ctx: CanvasRenderingContext2D, biome: string, x: number, y: number, r: number): boolean {
   if (!propSheet?.complete || propSheet.naturalWidth === 0) return false;
   const cls = r < 22 ? "s" : "l";

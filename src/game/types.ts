@@ -194,6 +194,14 @@ export type Hud = {
   banner: string;
   weapon: string;
   weaponKind: WeaponKind | null;
+  /** Active gear x spell combo name, or "". */
+  combo: string;
+  /** Active 30-second wave twist label with seconds left, or "". */
+  twist: string;
+  /** Active shrine buff label with seconds left, or "". */
+  buff: string;
+  /** Rift Surge meter 0..1 (1 = ready). */
+  surge: number;
   slots: { slot: Slot; name: string; filled: boolean }[];
   kills: number;
   portal: number;

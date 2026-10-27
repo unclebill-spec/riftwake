@@ -247,6 +247,17 @@ export function GameApp() {
                 <p className="mt-1 text-xs text-fg">
                   {Math.ceil(hud.hp)} / {hud.maxHp}
                 </p>
+                <div className="mt-1 h-1.5 overflow-hidden rounded-md bg-raised">
+                  <div className={hud.surge >= 1 ? "h-full bg-accent" : "h-full bg-spell"} style={{ width: `${Math.round(hud.surge * 100)}%` }} />
+                </div>
+                {stickOn ? (
+                  <p className="text-xs text-muted">{hud.surge >= 1 ? "Surge ready · E / Space" : `Surge ${Math.floor(hud.surge * 100)}%`}</p>
+                ) : (
+                  // Keyboard layout: always show the Surge keys so the control is discoverable.
+                  <p className={hud.surge >= 1 ? "text-xs font-semibold text-accent" : "text-xs text-fg"}>
+                    {hud.surge >= 1 ? "Surge ready! Press E / Space" : `Surge ${Math.floor(hud.surge * 100)}% · E / Space`}
+                  </p>
+                )}
               </div>
               <div className="rounded-md bg-surface/90 px-3 py-2 text-right">
                 <p className="font-display text-sm text-spell">{shotLabel(hud.type)}</p>
@@ -254,6 +265,9 @@ export function GameApp() {
                   Speed {hud.speed} · Amount {hud.amount}
                 </p>
                 <p className="text-xs text-fg">{hud.weapon}</p>
+                {hud.combo && <p className="text-xs text-accent">Combo: {hud.combo}</p>}
+                {hud.twist && <p className="text-xs text-accent">{hud.twist}</p>}
+                {hud.buff && <p className="text-xs text-accent">Shrine: {hud.buff}</p>}
                 {hud.rage > 0 && <p className="text-xs text-accent">Rage {hud.rage.toFixed(1)}s</p>}
                 {hud.sealed && <p className="text-xs text-muted">Portal sealed until wave 5</p>}
               </div>
@@ -290,6 +304,14 @@ export function GameApp() {
               onClick={() => gameRef.current?.togglePause()}
             >
               Pause
+            </button>
+            <button
+              type="button"
+              disabled={(hud?.surge ?? 0) < 1}
+              className="absolute bottom-4 right-24 min-h-11 rounded-md bg-surface px-3 text-accent disabled:text-muted"
+              onClick={() => gameRef.current?.surge()}
+            >
+              Surge {(hud?.surge ?? 0) >= 1 ? "!" : `${Math.floor((hud?.surge ?? 0) * 100)}%`}
             </button>
           </>
         )}

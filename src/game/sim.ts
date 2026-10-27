@@ -179,6 +179,33 @@ export class Game {
   clearedLevel = 1;
   /** Seconds left on the '+' pop over the hero's head after an auto-equip upgrade (transient, never saved). */
   plusT = 0;
+  /** Juice (feel only, never saved): seconds of hit-stop left; frame() skips sim steps while > 0. */
+  hitStop = 0;
+  private comboWordT = 0;
+  /** 30-second wave twists (transient, never saved). */
+  twist: TwistId | "" = "";
+  twistT = 0;
+  twistClock = 0;
+  twistN = 0;
+  private rainT = 0;
+  /** Elite boss-move state, parallel to `enemies` (kind "" = idle). */
+  readonly emove: { kind: "" | EliteMoveId; cd: number; t: number; x: number; y: number; n: number }[] = Array.from({ length: MAX_E }, () => ({ kind: "" as const, cd: 0, t: 0, x: 0, y: 0, n: 0 }));
+  /** Rift shrine (one at a time, own rng so the main stream is untouched) and the timed buff it grants. */
+  readonly shrine = { alive: false, x: 0, y: 0, t: 0, kind: "haste" as BuffId };
+  shrineClock = 0;
+  shrineRng: () => number = mulberry32(1);
+  buff: BuffId | "" = "";
+  buffT = 0;
+  shieldHits = 0;
+  /** Rift Surge ultimate meter (0..SURGE.max), filled by kills and combos. */
+  surgeMeter = 0;
+  /** Seconds left on the cosmetic surge shockwave ring. */
+  surgeFx = 0;
+  private surgeWas = false;
+  readonly rain: { alive: boolean; x: number; y: number; t: number }[] = Array.from({ length: 14 }, () => ({ alive: false, x: 0, y: 0, t: 0 }));
+  private lastCombo = "";
+  /** Damage-number pops (cosmetic pool). */
+  readonly nums: DmgNum[] = Array.from({ length: MAX_NUMS }, () => ({ alive: false, x: 0, y: 0, v: 0, t: 0, color: "#ffffff", text: "" }));
 
   private run!: RunSave;
   private baseline!: RunSave;
@@ -215,6 +242,10 @@ export class Game {
     banner: "",
     weapon: "Unarmed",
     weaponKind: null,
+    combo: "",
+    twist: "",
+    buff: "",
+    surge: 0,
     slots: SLOTS.map((slot) => ({ slot, name: "Empty", filled: false })),
     kills: 0,
     portal: 1,
@@ -388,7 +419,12 @@ export class Game {
 
   frame(dt: number): void {
     this.pollPause();
-    if (this.mode === "playing" && !this.hold) {
+    this.pollSurge();
+    if (this.mode === "playing" && !this.hold && this.hitStop > 0) {
+      // Hit-stop: freeze the sim for a few frames (render keeps going, shake keeps decaying).
+      this.hitStop = Math.max(0, this.hitStop - Math.min(0.1, dt));
+      this.shake *= Math.exp(-Math.min(0.1, dt) * 7);
+    } else if (this.mode === "playing" && !this.hold) {
       this.accum += Math.min(0.1, dt);
       let guard = 0;
       while (this.accum >= 1 / 60 && guard < 5 && this.mode === "playing") {
@@ -457,6 +493,25 @@ export class Game {
     this.camReady = false;
     this.accum = 0;
     this.plusT = 0;
+    this.hitStop = 0;
+    this.comboWordT = 0;
+    this.lastCombo = "";
+    this.twist = "";
+    this.twistT = 0;
+    this.twistClock = 0;
+    this.twistN = 0;
+    this.rainT = 0;
+    for (const r of this.rain) r.alive = false;
+    for (const m of this.emove) m.kind = "";
+    this.shrine.alive = false;
+    this.shrineClock = SHRINE.every - SHRINE.firstAt;
+    this.shrineRng = mulberry32(((this.seed || 1) ^ 0x5a17c3) >>> 0 || 1);
+    this.buff = "";
+    this.buffT = 0;
+    this.shieldHits = 0;
+    this.surgeMeter = 0;
+    this.surgeFx = 0;
+    for (const n of this.nums) n.alive = false;
     for (const e of this.enemies) e.alive = false;
     for (const p of this.projs) p.alive = false;
     for (const d of this.drops) d.alive = false;
@@ -533,6 +588,43 @@ export class Game {
     this.pauseWas = down;
   }
 
+  /** Surge keys (E / Space unless bound to something else); edge-triggered, never touches movement. */
+  private pollSurge(): void {
+    const b = this.settings.binds;
+    const used = new Set(Object.values(b));
+    const down = SURGE_KEYS.some((k) => !used.has(k) && this.pressed(k));
+    if (down && !this.surgeWas) this.surge();
+    this.surgeWas = down;
+  }
+
+  /** Fires the Rift Surge when the meter is full: hits every enemy on screen, reused impact FX ring. */
+  surge(): boolean {
+    if (this.mode !== "playing" || this.surgeMeter < SURGE.max) return false;
+    this.surgeMeter = 0;
+    this.surgeFx = SURGE.fxTime;
+    const diff = DIFF[this.diffIndex] ?? DIFF[2];
+    const dmg = 34 * SURGE.mul * diff.hp * (1 + (this.wave - 1) * 0.16) * (1 + (this.level - 1) * 0.2) * (this.quick ? 0.35 : 1);
+    const px = this.player.x;
+    const py = this.player.y;
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      if (!e?.alive || Math.abs(e.x - px) > SURGE.reachX || Math.abs(e.y - py) > SURGE.reachY) continue;
+      this.spawnImpact(e.x, e.y, "beam");
+      this.hurtEnemy(i, dmg, this.run.mods.type, e.x - px, e.y - py);
+    }
+    const types: (ShotType | "beam")[] = ["bolt", "fire", "ice", "water", "beam"];
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      this.spawnImpact(px + Math.cos(a) * 90, py + Math.sin(a) * 90, types[k % types.length] ?? "bolt");
+    }
+    this.shake = Math.min(JUICE.shakeCap, this.shake + 8);
+    this.hitStop = Math.max(this.hitStop, 0.08);
+    this.banner = "Rift Surge!";
+    this.bannerT = 1.2;
+    this.audio.rage();
+    return true;
+  }
+
   private pressed(code: string): boolean {
     if (this.probe) return this.probe.has(code);
     return this.keys.has(code);
@@ -563,6 +655,7 @@ export class Game {
   private step(dt: number): void {
     const ax = this.moveAxes();
     let speed = HERO[this.run.hero].speed;
+    if (this.buff === "haste") speed *= SHRINE.haste;
     if (this.biome === "ice") speed *= 0.78;
     else if (this.biome === "snow") speed *= 0.9;
     this.player.vx = ax.x * speed;
@@ -603,6 +696,15 @@ export class Game {
     this.player.castT = Math.max(0, this.player.castT - dt);
     this.player.jumpT = Math.max(0, this.player.jumpT - dt);
     if (this.player.fireCd <= 0) this.fire();
+    this.comboWordT = Math.max(0, this.comboWordT - dt);
+    const cname = this.combo()?.name ?? "";
+    if (cname !== this.lastCombo) {
+      this.lastCombo = cname;
+      if (cname) {
+        this.banner = `Combo: ${cname}!`;
+        this.bannerT = 1.6;
+      }
+    }
 
     if (!this.camReady) {
       this.camX = this.player.x;
@@ -616,6 +718,8 @@ export class Game {
     this.shake *= Math.exp(-dt * 7);
 
     this.spawnStep(dt);
+    this.twistStep(dt);
+    this.shrineStep(dt);
     this.hashEnemies();
     this.moveEnemies(dt);
     this.moveProjs(dt);
@@ -885,7 +989,7 @@ export class Game {
     }
     const count = Math.min(8, 1 + mods.amount);
     const spread = (6 * Math.PI) / 180;
-    this.player.fireCd = Math.max(0.11, cd);
+    this.player.fireCd = Math.max(0.11, cd * (this.buff === "fire" ? SHRINE.fireCd : 1));
     this.player.castT = 0.2;
     const base = this.nearestAim();
     for (let i = 0; i < count; i++) {
@@ -918,7 +1022,9 @@ export class Game {
       if (!e?.alive) continue;
       if (distSeg(e.x, e.y, this.player.x, this.player.y, dx, dy, len) < e.radius + 8) {
         this.spawnImpact(e.x, e.y, "beam");
+        const primed = e.burn > 0 && e.slow > 0;
         this.hurtEnemy(i, dmg, "beam", dx, dy);
+        this.comboHit(i, dmg, "beam", primed);
       }
     }
     if (this.wave >= 5 && distSeg(this.portal.x, this.portal.y, this.player.x, this.player.y, dx, dy, len) < this.portal.r + 8) {
@@ -1014,6 +1120,13 @@ export class Game {
     e.radius = elite ? 30 : kind === "spider" || kind === "satyr" ? 12 : 14;
     e.damage = (elite ? 16 : 9) * diff.dmg;
     e.elite = elite;
+    const em = this.emove[this.enemies.indexOf(e)];
+    if (em) {
+      em.kind = "";
+      em.t = 0;
+      em.n = 0;
+      em.cd = ELITE_MOVE.firstCd;
+    }
     e.slow = 0;
     e.burn = 0;
     e.kx = 0;
@@ -1072,6 +1185,7 @@ export class Game {
       const dx = this.player.x - e.x;
       const dy = this.player.y - e.y;
       const dist = Math.hypot(dx, dy) || 1;
+      const held = e.elite && this.eliteMove(i, e, dist, dt);
       let sx = dx / dist;
       let sy = dy / dist;
       if (RANGED.has(e.kind) && dist < 200) {
@@ -1093,8 +1207,9 @@ export class Game {
         sx = steer.x;
         sy = steer.y;
       }
-      e.vx = sx * e.speed * hopBoost * slow + e.kx;
-      e.vy = sy * e.speed * hopBoost * slow + e.ky;
+      const go = held ? 0 : 1;
+      e.vx = sx * e.speed * hopBoost * slow * go + e.kx;
+      e.vy = sy * e.speed * hopBoost * slow * go + e.ky;
       const x0 = e.x;
       const y0 = e.y;
       this.moveBody(e, e.radius, dt, GHOSTLIKE.has(e.kind));
@@ -1111,6 +1226,7 @@ export class Game {
       }
       if (e.hop > 0) e.anim = "jump";
       else e.anim = "walk";
+      if (held) e.anim = this.emove[i]?.kind === "slam" ? "jump" : "cast";
       if (RANGED.has(e.kind)) this.rangedThink(e, dist, dx, dy, dt);
       if (dist < e.radius + 13 && e.hitCd <= 0) {
         this.hurt(e.damage);
@@ -1119,6 +1235,102 @@ export class Game {
       if (e.hp <= 0) this.killEnemy(i);
     }
     this.separate();
+  }
+
+  /** Elite telegraphed moves: wind-up (elite holds still, ground marker) then the attack. True while winding up. */
+  private eliteMove(i: number, e: Enemy, dist: number, dt: number): boolean {
+    const m = this.emove[i];
+    if (!m) return false;
+    if (m.kind) {
+      m.t -= dt;
+      if (m.kind === "volley") {
+        m.x = e.x;
+        m.y = e.y;
+      }
+      if (m.t > 0) return true;
+      const kind = m.kind;
+      m.kind = "";
+      if (kind === "slam") {
+        this.spawnImpact(m.x, m.y, "enemy");
+        for (let k = 0; k < 6; k++) {
+          const a = (k / 6) * Math.PI * 2;
+          this.spawnImpact(m.x + Math.cos(a) * ELITE_MOVE.slamR * 0.6, m.y + Math.sin(a) * ELITE_MOVE.slamR * 0.6, "enemy");
+        }
+        this.burst(m.x, m.y, "#d2644a", 8);
+        this.shake = Math.min(JUICE.shakeCap, this.shake + 4);
+        if (Math.hypot(this.player.x - m.x, this.player.y - m.y) < ELITE_MOVE.slamR) this.hurt(e.damage * ELITE_MOVE.slamMul);
+      } else {
+        const off = (m.n % 2) * (Math.PI / ELITE_MOVE.volleyN);
+        for (let k = 0; k < ELITE_MOVE.volleyN; k++) {
+          const a = off + (k / ELITE_MOVE.volleyN) * Math.PI * 2;
+          this.spawnProj(e.x, e.y, Math.cos(a), Math.sin(a), e.damage * ELITE_MOVE.volleyMul, ELITE_MOVE.volleySpeed, 2.4, 0, 0, "bolt", false, 6);
+        }
+        this.spawnImpact(e.x, e.y, "enemy");
+      }
+      m.cd = ELITE_MOVE.cd + (i % 3) * 0.5;
+      return false;
+    }
+    m.cd -= dt;
+    if (m.cd > 0 || dist > ELITE_MOVE.range || this.mode !== "playing") return false;
+    const first = hash2(7, e.kind.length, e.kind.charCodeAt(0)) < 0.5 ? 0 : 1;
+    m.kind = (m.n + first) % 2 === 0 ? "slam" : "volley";
+    m.n++;
+    m.t = ELITE_MOVE.windup;
+    m.x = m.kind === "slam" ? this.player.x : e.x;
+    m.y = m.kind === "slam" ? this.player.y : e.y;
+    return true;
+  }
+
+  /** Spawns a shrine every SHRINE.every s near the hero (clear of props/lava), grants its buff on touch, ticks the buff. */
+  private shrineStep(dt: number): void {
+    if (this.buffT > 0) {
+      this.buffT -= dt;
+      if (this.buffT <= 0) {
+        this.buff = "";
+        this.shieldHits = 0;
+      }
+    }
+    const s = this.shrine;
+    if (s.alive) {
+      s.t -= dt;
+      if (s.t <= 0) s.alive = false;
+      else if (Math.hypot(s.x - this.player.x, s.y - this.player.y) < SHRINE.touchR) this.takeShrine();
+      return;
+    }
+    this.shrineClock += dt;
+    if (this.shrineClock < SHRINE.every) return;
+    this.shrineClock = 0;
+    this.placeShrine(BUFF_ORDER[Math.floor(this.shrineRng() * BUFF_ORDER.length)] ?? "haste");
+  }
+
+  /** Places a shrine on open ground near the hero (also the test/screenshot hook). False if no clear spot. */
+  placeShrine(kind: BuffId): boolean {
+    const r = this.shrineRng;
+    for (let k = 0; k < 16; k++) {
+      const a = r() * Math.PI * 2;
+      const d = SHRINE.minD + r() * (SHRINE.maxD - SHRINE.minD);
+      const x = this.player.x + Math.cos(a) * d;
+      const y = this.player.y + Math.sin(a) * d;
+      if (x < 80 || y < 80 || x > ARENA - 80 || y > ARENA - 80) continue;
+      if (this.hitsProp(x, y, SHRINE.propClear) || this.lavaAt(x, y)) continue;
+      if (Math.hypot(x - this.portal.x, y - this.portal.y) < this.portal.r + 80) continue;
+      Object.assign(this.shrine, { alive: true, x, y, t: SHRINE.life, kind });
+      return true;
+    }
+    return false;
+  }
+
+  private takeShrine(): void {
+    const s = this.shrine;
+    s.alive = false;
+    this.buff = s.kind;
+    this.buffT = SHRINE.buffT;
+    this.shieldHits = s.kind === "shield" ? SHRINE.shieldHits : 0;
+    this.banner = `Shrine: ${BUFFS[s.kind].name}!`;
+    this.bannerT = 1.6;
+    this.spawnImpact(s.x, s.y, "beam");
+    this.burst(s.x, s.y, BUFFS[s.kind].color, 8);
+    this.audio.pickup();
   }
 
   private rangedThink(e: Enemy, dist: number, dx: number, dy: number, dt: number): void {
@@ -1214,7 +1426,9 @@ export class Game {
       if (Math.hypot(p.x - e.x, p.y - e.y) > p.radius + e.radius) continue;
       this.markHit(p, j);
       this.spawnImpact(p.x, p.y, p.type);
+      const primed = e.burn > 0 && e.slow > 0;
       this.hurtEnemy(j, p.damage, p.type, p.vx, p.vy);
+      this.comboHit(j, p.damage, p.type, primed);
       if (p.splash > 0) this.splashAt(e.x, e.y, p.splash, p.damage * 0.45, j);
       const hits = (p.h0 >= 0 ? 1 : 0) + (p.h1 >= 0 ? 1 : 0) + (p.h2 >= 0 ? 1 : 0);
       if (hits > p.pierce) {
@@ -1255,7 +1469,8 @@ export class Game {
     const e = this.enemies[index];
     if (!e?.alive) return;
     e.hp -= dmg;
-    e.flash = 0.08;
+    e.flash = JUICE.flash;
+    this.hitJuice(e, dmg, vx, vy, type);
     if (type === "fire") e.burn = Math.max(e.burn, 2);
     if (type === "ice") e.slow = Math.max(e.slow, 1.5);
     if (type === "water") {
@@ -1266,11 +1481,196 @@ export class Game {
     if (e.hp <= 0) this.killEnemy(index);
   }
 
+  /** Every TWIST.every seconds of play, starts the next twist in a fixed order, shown with a banner. */
+  private twistStep(dt: number): void {
+    if (this.twist) {
+      this.twistT -= dt;
+      if (this.twist === "rain") this.rainStep(dt);
+      if (this.twistT <= 0) this.twist = "";
+    } else {
+      this.twistClock += dt;
+      if (this.twistClock >= TWIST.every && this.wave < 5) this.startTwist(TWIST_ORDER[this.twistN % TWIST_ORDER.length] ?? "swarm");
+    }
+    for (const r of this.rain) {
+      if (!r.alive) continue;
+      r.t -= dt;
+      if (r.t > 0) continue;
+      r.alive = false;
+      this.spawnImpact(r.x, r.y, "enemy");
+      this.burst(r.x, r.y, "#d2644a", 4);
+      if (Math.hypot(r.x - this.player.x, r.y - this.player.y) < TWIST.rainR + 10) {
+        const diff = DIFF[this.diffIndex] ?? DIFF[2];
+        this.hurt(9 * diff.dmg * TWIST.rainMul);
+      }
+    }
+  }
+
+  /** Starts a twist now (also the test/screenshot hook). */
+  startTwist(id: TwistId): void {
+    if (id === "elites" && this.wave < 2) id = "swarm";
+    this.twist = id;
+    this.twistT = TWISTS[id].time;
+    this.twistClock = 0;
+    this.twistN += 1;
+    this.banner = `Twist: ${TWISTS[id].name}!`;
+    this.bannerT = 2;
+    this.rainT = 0.6;
+    const free = () => this.enemies.filter((e) => !e.alive).length > 4;
+    if (id === "swarm") {
+      for (let n = 0; n < TWIST.swarmCount && free(); n++) {
+        const e = this.enemies.find((q) => !q.alive);
+        this.spawnOne(false);
+        if (e?.alive) {
+          e.hp *= TWIST.swarmHp;
+          e.maxHp = e.hp;
+          e.speed *= TWIST.swarmSpeed;
+        }
+      }
+    } else if (id === "elites") {
+      for (let n = 0; n < 2 && free(); n++) this.spawnOne(true);
+    }
+  }
+
+  private rainStep(dt: number): void {
+    this.rainT -= dt;
+    if (this.rainT > 0) return;
+    this.rainT = TWIST.rainGap;
+    const r = this.rain.find((q) => !q.alive);
+    if (!r) return;
+    const a = this.rng() * Math.PI * 2;
+    const d = 30 + this.rng() * 200;
+    r.alive = true;
+    r.x = Math.max(40, Math.min(ARENA - 40, this.player.x + Math.cos(a) * d));
+    r.y = Math.max(40, Math.min(ARENA - 40, this.player.y + Math.sin(a) * d));
+    r.t = TWIST.rainWarn;
+  }
+
+  /** Gear x spell combo from the equipped weapon's element and the current shot type (gear rule untouched). */
+  combo(): (typeof COMBOS)[number] | null {
+    const el = this.run?.weapon ? WEAPON_ELEMENT[this.run.weapon.kind] : null;
+    const type = this.run?.mods.type;
+    if (!el || !type || el === type) return null;
+    return COMBOS.find((c) => (c.a === el && c.b === type) || (c.b === el && c.a === type)) ?? null;
+  }
+
+  /** Applies the active combo's extra effect after a direct hit (never recurses into itself). */
+  private comboHit(index: number, dmg: number, type: ShotType, primed: boolean): void {
+    const c = this.combo();
+    const e = this.enemies[index];
+    if (!c || !e || type !== this.run.mods.type) return;
+    const word = (text: string, color: string) => {
+      if (this.comboWordT > 0) return;
+      this.comboWordT = COMBO.wordGap;
+      this.surgeMeter = Math.min(SURGE.max, this.surgeMeter + SURGE.combo);
+      this.popNum(e.x, spriteTop(e) - 38, text, color);
+    };
+    if (c.id === "shatter") {
+      // Fire + ice: a hit chills and scorches; hitting a target that is already both shatters it.
+      if (e.alive && primed) {
+        e.burn = 0;
+        e.slow = 0;
+        this.spawnImpact(e.x, e.y, "ice");
+        this.spawnImpact(e.x + 10, e.y - 6, "fire");
+        this.burst(e.x, e.y, "#bfe9ff", 10, 1.4, true);
+        this.shake = Math.min(JUICE.shakeCap, this.shake + 2);
+        word("SHATTER!", "#9fe8ff");
+        for (let i = 0; i < this.enemies.length; i++) {
+          const o = this.enemies[i];
+          if (i === index || !o?.alive) continue;
+          if (Math.hypot(o.x - e.x, o.y - e.y) < COMBO.shatterR + o.radius) this.hurtEnemy(i, dmg * COMBO.shatterMul, "ice", o.x - e.x, o.y - e.y);
+        }
+        this.hurtEnemy(index, dmg * COMBO.shatterMul, "bolt", 0, 0);
+      } else if (e.alive) {
+        e.burn = Math.max(e.burn, 2);
+        e.slow = Math.max(e.slow, 1.5);
+      }
+    } else if (c.id === "chain") {
+      // Water + bolt: the hit arcs to the nearest few foes.
+      let from = e;
+      const hit = new Set<number>([index]);
+      for (let n = 0; n < COMBO.chainJumps; n++) {
+        let best = -1;
+        let bd = COMBO.chainR;
+        for (let i = 0; i < this.enemies.length; i++) {
+          const o = this.enemies[i];
+          if (!o?.alive || hit.has(i)) continue;
+          const d = Math.hypot(o.x - from.x, o.y - from.y);
+          if (d < bd) {
+            bd = d;
+            best = i;
+          }
+        }
+        const o = this.enemies[best];
+        if (!o) break;
+        hit.add(best);
+        const b = this.beams.find((q) => !q.alive);
+        if (b) Object.assign(b, { alive: true, x: from.x, y: from.y, dx: (o.x - from.x) / (bd || 1), dy: (o.y - from.y) / (bd || 1), len: bd, life: 0.12, type: "beam" });
+        this.spawnImpact(o.x, o.y, "water");
+        this.hurtEnemy(best, dmg * COMBO.chainMul, "bolt", o.x - from.x, o.y - from.y);
+        from = o;
+      }
+      if (hit.size > 1) word("CHAIN!", "#7fd8ff");
+    } else if (c.id === "frostbind") {
+      // Ice + water: the chill lasts longer.
+      if (e.alive) e.slow = Math.max(e.slow, COMBO.frostSlow);
+      word("FROSTBIND", "#c8f0ff");
+    } else if (c.id === "steam") {
+      // Fire + water: a small steam puff scalds neighbours.
+      this.spawnImpact(e.x, e.y, "water");
+      let any = false;
+      for (let i = 0; i < this.enemies.length; i++) {
+        const o = this.enemies[i];
+        if (i === index || !o?.alive) continue;
+        if (Math.hypot(o.x - e.x, o.y - e.y) < COMBO.steamR + o.radius) {
+          this.hurtEnemy(i, dmg * COMBO.steamMul, "bolt", o.x - e.x, o.y - e.y);
+          any = true;
+        }
+      }
+      if (any) word("STEAM!", "#e8e4ff");
+    }
+  }
+
+  /** Feel-only hit feedback: knockback nudge, shake scaled by hit size, damage number. */
+  private hitJuice(e: Enemy, dmg: number, vx: number, vy: number, type: ShotType): void {
+    let dx = vx;
+    let dy = vy;
+    if (dx === 0 && dy === 0) {
+      dx = e.x - this.player.x;
+      dy = e.y - this.player.y;
+    }
+    const m = Math.hypot(dx, dy) || 1;
+    if (type !== "water") {
+      const k = JUICE.knock * (e.elite ? JUICE.knockElite : 1);
+      e.kx += (dx / m) * k;
+      e.ky += (dy / m) * k;
+    }
+    const size = Math.min(1, dmg / JUICE.bigHit);
+    this.shake = Math.min(JUICE.shakeCap, this.shake + size * (e.elite ? JUICE.shakeElite : JUICE.shakeHit));
+    if (e.elite) this.hitStop = Math.max(this.hitStop, JUICE.stopElite);
+    this.popNum(e.x, spriteTop(e) - 14, Math.max(1, Math.round(dmg)), dmg >= JUICE.bigHit ? "#ffd27a" : "#ffffff");
+  }
+
+  /** Spawns a floating number/word; reuses the oldest when full. */
+  popNum(x: number, y: number, value: number | string, color: string): void {
+    let n = this.nums.find((q) => !q.alive);
+    if (!n) n = this.nums.reduce((a, b) => (b.t > a.t ? b : a));
+    n.alive = true;
+    n.x = x + ((this.kills * 7 + (typeof value === "number" ? value : 3) * 13) % 17) - 8;
+    n.y = y;
+    n.t = 0;
+    n.v = typeof value === "number" ? value : 0;
+    n.text = String(value);
+    n.color = color;
+  }
+
   private killEnemy(index: number): void {
     const e = this.enemies[index];
     if (!e?.alive) return;
     e.alive = false;
+    this.hitStop = Math.max(this.hitStop, e.elite ? JUICE.stopEliteKill : JUICE.stopKill);
+    this.shake = Math.min(JUICE.shakeCap, this.shake + (e.elite ? JUICE.shakeEliteKill : JUICE.shakeKill));
     this.kills += 1;
+    this.surgeMeter = Math.min(SURGE.max, this.surgeMeter + (e.elite ? SURGE.elite : SURGE.kill));
     this.audio.hit();
     this.burst(e.x, e.y, e.elite ? "#e0b15a" : "#c8c2b4", e.elite ? 10 : 5);
     const elite = e.elite;
@@ -1341,7 +1741,7 @@ export class Game {
       if (!d?.alive) continue;
       d.grace = Math.max(0, d.grace - dt);
       const dist = Math.hypot(d.x - this.player.x, d.y - this.player.y);
-      if (dist >= 24 || d.grace > 0) continue;
+      if (dist >= 24 * (this.buff === "magnet" ? SHRINE.magnet : 1) || d.grace > 0) continue;
       if (d.kind === "gear" || d.kind === "weapon") this.autoEquip(d);
       else this.takeInstant(d);
     }
@@ -1392,6 +1792,17 @@ export class Game {
 
   private hurt(amount: number): void {
     if (this.player.hurtCd > 0 || this.mode !== "playing") return;
+    if (this.buff === "shield" && this.shieldHits > 0) {
+      this.shieldHits--;
+      this.player.hurtCd = 0.62;
+      this.spawnImpact(this.player.x, this.player.y, "water");
+      this.audio.pickup();
+      if (this.shieldHits <= 0) {
+        this.buff = "";
+        this.buffT = 0;
+      }
+      return;
+    }
     this.player.hp -= amount * (1 - this.totals().def);
     this.player.hurtCd = 0.62;
     this.shake = Math.min(12, this.shake + 5);
@@ -1419,6 +1830,13 @@ export class Game {
 
   /** Advances impact bursts (also used by the screenshot harness). */
   stepFx(dt: number): void {
+    this.surgeFx = Math.max(0, this.surgeFx - dt);
+    for (const n of this.nums) {
+      if (!n.alive) continue;
+      n.t += dt;
+      n.y -= 38 * dt;
+      if (n.t >= NUM_TIME) n.alive = false;
+    }
     for (const f of this.impacts) {
       if (!f.alive) continue;
       f.t += dt;
@@ -1487,6 +1905,10 @@ export class Game {
     h.banner = this.bannerT > 0 ? this.banner : "";
     h.weapon = this.run.weapon?.name ?? "Plain bolt";
     h.weaponKind = this.run.weapon?.kind ?? null;
+    h.combo = this.combo()?.name ?? "";
+    h.buff = this.buff ? `${BUFFS[this.buff].name} ${Math.ceil(this.buffT)}s${this.buff === "shield" ? ` (${this.shieldHits})` : ""}` : "";
+    h.surge = this.surgeMeter / SURGE.max;
+    h.twist = this.twist ? `${TWISTS[this.twist].name} ${Math.ceil(this.twistT)}s` : "";
     h.kills = this.kills;
     h.portal = Math.max(0, this.portal.hp);
     h.portalMax = this.portal.maxHp;
@@ -1518,6 +1940,67 @@ function distSeg(px: number, py: number, x: number, y: number, dx: number, dy: n
 }
 
 export const PLUS_TIME = 0.9;
+export const NUM_TIME = 0.6;
+/** Rift Surge ultimate (BALANCE.md "Fun batch 2"). mul scales the burst to a wave-scaled normal enemy's base HP (flagged). */
+export const SURGE = { max: 100, kill: 2, elite: 10, combo: 2, mul: 1.5, reachX: 760, reachY: 360, fxTime: 0.5 };
+export const SURGE_KEYS = ["KeyE", "Space"];
+export type BuffId = "haste" | "fire" | "shield" | "magnet";
+/** Rift shrines (BALANCE.md "Fun batch 2"). fireCd and shieldHits touch DPS / damage taken (flagged). */
+export const SHRINE = { every: 35, firstAt: 20, life: 20, minD: 200, maxD: 400, propClear: 60, touchR: 34, buffT: 10, haste: 1.3, fireCd: 0.7, shieldHits: 2, magnet: 3 };
+export const BUFFS: Record<BuffId, { name: string; art: string; color: string }> = {
+  haste: { name: "Haste", art: "crystal_ice", color: "#8fe3ff" },
+  fire: { name: "Rapid Fire", art: "crystal_violet", color: "#c38bff" },
+  shield: { name: "Rift Shield", art: "rune_pillar", color: "#7dffb0" },
+  magnet: { name: "Magnet", art: "rune_stone", color: "#ffd27a" },
+};
+export const BUFF_ORDER: BuffId[] = ["haste", "fire", "shield", "magnet"];
+export type EliteMoveId = "slam" | "volley";
+/** Elite boss moves (BALANCE.md "Fun batch 2"). slamMul / volleyMul scale the elite's own contact damage (flagged). */
+export const ELITE_MOVE = { windup: 0.9, firstCd: 3, cd: 5, range: 420, slamR: 70, slamMul: 1, volleyN: 8, volleyMul: 0.7, volleySpeed: 140 };
+/** Boss-sheet world px per art px for elites (render: max(2, round(zoom*5.2))/zoom) and the tallest boss cell above the feet. */
+export const ELITE_ART_PX = 5.2;
+/** World y of the top of an enemy's drawn sprite (elites: tallest boss cell + "Elite X" label). */
+export function spriteTop(e: Enemy): number {
+  if (e.elite) return e.y + e.radius * 0.7 - 38 * ELITE_ART_PX - 16;
+  return e.y - 36;
+}
+export type TwistId = "swarm" | "elites" | "dark" | "rain";
+export const TWISTS: Record<TwistId, { name: string; time: number }> = {
+  swarm: { name: "Fast Swarm", time: 10 },
+  elites: { name: "Elite Pair", time: 10 },
+  dark: { name: "Darkness", time: 12 },
+  rain: { name: "Shot Rain", time: 8 },
+};
+export const TWIST_ORDER: TwistId[] = ["swarm", "elites", "dark", "rain"];
+/** Twist numbers (BALANCE.md "Wave twists"; swarmHp and rainMul touch HP/damage — flagged for Will). */
+export const TWIST = { every: 30, swarmCount: 10, swarmHp: 0.5, swarmSpeed: 1.3, rainGap: 0.5, rainWarn: 0.9, rainR: 26, rainMul: 0.85 };
+/** Element each weapon kind brings to a combo (BALANCE.md "Combos"). */
+export const WEAPON_ELEMENT: Record<WeaponKind, ShotType> = { sword: "bolt", axe: "fire", bow: "ice", staff: "water" };
+export const COMBOS = [
+  { id: "shatter", name: "Shatter", a: "fire", b: "ice" },
+  { id: "chain", name: "Chain", a: "water", b: "bolt" },
+  { id: "frostbind", name: "Frostbind", a: "ice", b: "water" },
+  { id: "steam", name: "Steam", a: "fire", b: "water" },
+] as const;
+/** Combo effect numbers (BALANCE.md; shatterMul/chainMul/steamMul add damage — flagged for Will). */
+export const COMBO = { shatterR: 72, shatterMul: 0.6, chainJumps: 2, chainR: 150, chainMul: 0.5, frostSlow: 3, steamR: 44, steamMul: 0.3, wordGap: 0.45 };
+const MAX_NUMS = 40;
+export type DmgNum = { alive: boolean; x: number; y: number; v: number; t: number; color: string; text: string };
+/** Hit-feel tuning (BALANCE.md "Juice"); none of these change damage or HP. */
+export const JUICE = {
+  flash: 0.09,
+  knock: 38,
+  knockElite: 0.35,
+  bigHit: 40,
+  shakeHit: 1.2,
+  shakeElite: 2.5,
+  shakeKill: 1.5,
+  shakeEliteKill: 7,
+  shakeCap: 9,
+  stopKill: 0.033,
+  stopElite: 0.033,
+  stopEliteKill: 0.1,
+};
 export const POOF_TIME = 0.4;
 
 export const ARENA_SIZE = ARENA;

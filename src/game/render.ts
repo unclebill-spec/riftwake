@@ -1,4 +1,4 @@
-import { ARENA_SIZE, IMPACT_TIME, PLUS_TIME, type Game } from "@/game/sim";
+import { ARENA_SIZE, BUFFS, ELITE_MOVE, SHRINE, SURGE, IMPACT_TIME, NUM_TIME, PLUS_TIME, TWIST, type Game } from "@/game/sim";
 import {
   blit,
   drawFloorTile,
@@ -7,6 +7,7 @@ import {
   drawIcon,
   drawPropSprite,
   drawGroundProp,
+  drawNamedProp,
   ensureIcons,
   FLOOR_VARIANT_RATE,
   SPECIAL_KINDS,
@@ -90,6 +91,53 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
   ctx.scale(VIEW_ZOOM, VIEW_ZOOM);
   ctx.translate(-game.camX, -game.camY);
   drawFloor(game, ctx, worldW, worldH);
+  // Ground telegraphs (elite moves, shot rain) sit under every actor sprite so they never tint the hero.
+  for (let i = 0; i < game.emove.length; i++) {
+    const m = game.emove[i];
+    const e = game.enemies[i];
+    if (!m?.kind || !e?.alive) continue;
+    // Elite move telegraph: filled marker plus a closing ring that meets it when the move lands.
+    const k = Math.max(0, m.t / ELITE_MOVE.windup);
+    const r = m.kind === "slam" ? ELITE_MOVE.slamR : e.radius + 26;
+    ctx.strokeStyle = m.kind === "slam" ? "rgba(255,150,40,0.95)" : "rgba(255,70,200,0.95)";
+    ctx.fillStyle = m.kind === "slam" ? `rgba(255,120,30,${0.12 + (1 - k) * 0.18})` : `rgba(255,70,200,${0.1 + (1 - k) * 0.15})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, r + k * 60, 0, Math.PI * 2);
+    ctx.stroke();
+    if (m.kind === "volley") {
+      const off = ((m.n - 1) % 2) * (Math.PI / ELITE_MOVE.volleyN);
+      ctx.beginPath();
+      for (let j = 0; j < ELITE_MOVE.volleyN; j++) {
+        const a = off + (j / ELITE_MOVE.volleyN) * Math.PI * 2;
+        ctx.moveTo(m.x + Math.cos(a) * r, m.y + Math.sin(a) * r);
+        ctx.lineTo(m.x + Math.cos(a) * (r + 46), m.y + Math.sin(a) * (r + 46));
+      }
+      ctx.stroke();
+    }
+  }
+  for (const r of game.rain) {
+    if (!r.alive) continue;
+    // Shot-rain telegraph: fixed hit circle plus a closing ring (lands when they meet).
+    const k = Math.max(0, r.t / TWIST.rainWarn);
+    ctx.strokeStyle = "rgba(255,70,60,0.9)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, TWIST.rainR, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, TWIST.rainR + k * 40, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,70,60,0.18)";
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, TWIST.rainR, 0, Math.PI * 2);
+    ctx.fill();
+  }
   let n = 0;
   const push = (y: number, k: number, i: number) => {
     const slot = sortBuf[n];
@@ -110,6 +158,7 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
     push(d.y, 2, i);
   }
   push(game.portal.y, 4, 0);
+  if (game.shrine.alive && onscreen(game, game.shrine.x, game.shrine.y, worldW, worldH, 80)) push(game.shrine.y, 5, 0);
   for (let i = 0; i < game.enemies.length && n < 418; i++) {
     const e = game.enemies[i];
     if (!e?.alive || !onscreen(game, e.x, e.y, worldW, worldH, 80)) continue;
@@ -127,10 +176,59 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
     if (item.k === 0) drawProp(ctx, game.props[item.i], game.biome);
     else if (item.k === 2) drawDrop(ctx, game, item.i, now);
     else if (item.k === 4) drawPortal(ctx, game, now);
+    else if (item.k === 5) drawShrine(ctx, game, now);
     else if (item.k === 1) drawEnemy(ctx, game, item.i);
     else drawHero(ctx, game);
   }
+  const dark = game.twist === "dark";
+  if (dark) {
+    // Darkness twist: dim the world except a clear pool around the hero, then redraw every
+    // on-screen monster on top (dimmed, with a 1 px neon rim) so they still read as monsters.
+    const g = ctx.createRadialGradient(game.player.x, game.player.y, DARK.clearR, game.player.x, game.player.y, DARK.fadeR);
+    g.addColorStop(0, "rgba(2,3,10,0)");
+    g.addColorStop(1, `rgba(2,3,10,${DARK.alpha})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(game.camX - worldW / 2 - 40, game.camY - worldH / 2 - 40, worldW + 80, worldH + 80);
+    for (const e of game.enemies) {
+      if (!e.alive || !onscreen(game, e.x, e.y, worldW, worldH, 80)) continue;
+      const d = Math.hypot(e.x - game.player.x, e.y - game.player.y);
+      if (d < DARK.clearR) continue;
+      ctx.save();
+      ctx.filter = e.elite ? "brightness(0) invert(1) sepia(1) saturate(4)" : "brightness(0) invert(1) sepia(1) saturate(6) hue-rotate(270deg)";
+      ctx.globalAlpha = 0.85;
+      for (const [ox, oy] of RIM) {
+        ctx.translate(ox, oy);
+        drawEnemyBody(ctx, game, e, true);
+        ctx.translate(-ox, -oy);
+      }
+      ctx.restore();
+      ctx.save();
+      ctx.globalAlpha = DARK.spriteAlpha;
+      drawEnemyBody(ctx, game, e, true);
+      ctx.restore();
+    }
+  }
+  if (game.surgeFx > 0) {
+    // Rift Surge shockwave: expanding neon ring from the hero (cosmetic).
+    const k = 1 - game.surgeFx / SURGE.fxTime;
+    ctx.save();
+    ctx.globalAlpha = 1 - k;
+    ctx.strokeStyle = "#9fe8ff";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(game.player.x, game.player.y, 40 + k * SURGE.reachX, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.globalCompositeOperation = "lighter";
+  if (dark) {
+    light(ctx, game.player.x, game.player.y, 120, "#9fd8ff", 0.3);
+    if (game.shrine.alive) light(ctx, game.shrine.x, game.shrine.y - 20, 60, BUFFS[game.shrine.kind].color, 0.6);
+    for (const e of game.enemies) {
+      if (!e.alive || !onscreen(game, e.x, e.y, worldW, worldH, 60)) continue;
+      light(ctx, e.x, e.y, e.elite ? 56 : 26, e.elite ? "#ffd27a" : "#ff4fa8", 0.35);
+    }
+  }
   const spellFrame = Math.floor(now / 80) & 7;
   const spells = spellReady();
   for (const b of game.beams) {
@@ -170,6 +268,7 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
     ctx.globalAlpha = Math.max(0, p.life / p.max);
     light(ctx, p.x, p.y, 8 + p.size, p.color, 0.8);
   }
+  drawNums(ctx, game);
   ctx.restore();
   vignette(ctx, w, h);
   if (game.player.hurtCd > 0.5) {
@@ -357,8 +456,20 @@ function drawPortal(ctx: CanvasRenderingContext2D, game: Game, now: number): voi
 function drawEnemy(ctx: CanvasRenderingContext2D, game: Game, index: number): void {
   const e = game.enemies[index];
   if (!e) return;
+  drawEnemyBody(ctx, game, e, false);
+  if (e.flash > 0) {
+    // White hit flash: same sprite redrawn as a solid white silhouette (hard alpha kept).
+    ctx.save();
+    ctx.filter = "brightness(0) invert(1)";
+    ctx.globalAlpha = 0.9;
+    drawEnemyBody(ctx, game, e, true);
+    ctx.restore();
+  }
+  drawEnemyExtras(ctx, game, e);
+}
+
+function drawEnemyBody(ctx: CanvasRenderingContext2D, game: Game, e: Game["enemies"][number], flat: boolean): void {
   const scale = e.elite ? 3 : 1.35;
-  if (e.flash > 0) ctx.globalAlpha = 0.55;
   const zoom = Math.hypot(ctx.getTransform().a, ctx.getTransform().b) || 1;
   const boss = (e.elite || SPECIAL_KINDS.has(e.kind)) && hasBoss(e.kind);
   // Boss art from Will's other games; feet sit a little below the body centre, like the atlas sprites.
@@ -366,7 +477,7 @@ function drawEnemy(ctx: CanvasRenderingContext2D, game: Game, index: number): vo
   if (boss && e.elite) {
     ctx.save();
     ctx.shadowColor = "#e0b15a";
-    ctx.shadowBlur = 14;
+    ctx.shadowBlur = flat ? 0 : 14;
     blitBoss(ctx, e.kind, e.anim, e.facing, e.frame, e.x, feet, Math.max(2, Math.round(zoom * 5.2)), true);
     ctx.restore();
   } else if (boss) {
@@ -374,13 +485,25 @@ function drawEnemy(ctx: CanvasRenderingContext2D, game: Game, index: number): vo
   } else if (e.elite) {
     ctx.save();
     ctx.shadowColor = "#e0b15a";
-    ctx.shadowBlur = 14;
+    ctx.shadowBlur = flat ? 0 : 14;
     blit(ctx, e.kind, e.anim, e.facing, e.frame, e.x, e.y, scale);
     ctx.restore();
-  } else {
+  } else if (flat) {
     blit(ctx, e.kind, e.anim, e.facing, e.frame, e.x, e.y, scale);
+  } else {
+    // Readability: faint cool dark-neon under-glow so small brown/grey grunts separate from the floor's crack lines.
+    ctx.save();
+    ctx.shadowColor = "rgba(70, 225, 255, 0.55)";
+    ctx.shadowBlur = 5;
+    blit(ctx, e.kind, e.anim, e.facing, e.frame, e.x, e.y, scale);
+    ctx.restore();
   }
-  ctx.globalAlpha = 1;
+}
+
+function drawEnemyExtras(ctx: CanvasRenderingContext2D, game: Game, e: Game["enemies"][number]): void {
+  const zoom = Math.hypot(ctx.getTransform().a, ctx.getTransform().b) || 1;
+  const boss = (e.elite || SPECIAL_KINDS.has(e.kind)) && hasBoss(e.kind);
+  const feet = e.y + e.radius * 0.7;
   if (e.elite) {
     ctx.fillStyle = "#ebe6da";
     ctx.font = "12px Outfit, sans-serif";
@@ -411,6 +534,56 @@ function drawHero(ctx: CanvasRenderingContext2D, game: Game): void {
 }
 
 /** Short gold '+' over the hero's head after an auto-equip upgrade: rises ~20 world px and fades. */
+function drawShrine(ctx: CanvasRenderingContext2D, game: Game, now: number): void {
+  const s = game.shrine;
+  const b = BUFFS[s.kind];
+  const pulse = 0.5 + 0.5 * Math.sin(now / 220);
+  const blink = s.t < 4 && Math.floor(now / 150) % 2 === 0;
+  ctx.save();
+  ctx.globalAlpha = blink ? 0.45 : 1;
+  ctx.strokeStyle = b.color;
+  ctx.lineWidth = 2;
+  ctx.globalAlpha *= 0.5 + pulse * 0.4;
+  ctx.beginPath();
+  ctx.ellipse(s.x, s.y, SHRINE.touchR + 6, (SHRINE.touchR + 6) * 0.45, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+  ctx.save();
+  if (blink) ctx.globalAlpha = 0.6;
+  if (!drawNamedProp(ctx, b.art, s.x, s.y, b.color, pulse)) {
+    ctx.fillStyle = b.color;
+    ctx.fillRect(s.x - 8, s.y - 40, 16, 40);
+  }
+  ctx.restore();
+}
+
+/** Darkness twist look (BALANCE.md): clear pool around the hero, dim beyond, monsters redrawn with a neon rim. */
+const DARK = { clearR: 120, fadeR: 200, alpha: 0.62, spriteAlpha: 0.8 };
+const RIM: [number, number][] = [[-1.5, 0], [1.5, 0], [0, -1.5], [0, 1.5]];
+
+/** Damage-number pops: quick scale-up then rise and step-fade (no smooth ramp). */
+function drawNums(ctx: CanvasRenderingContext2D, game: Game): void {
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.textAlign = "center";
+  for (const n of game.nums) {
+    if (!n.alive) continue;
+    const t = n.t / NUM_TIME;
+    const size = n.v === 0 ? 22 : n.v >= 40 ? 21 : 16;
+    const pop = t < 0.15 ? 1.35 : 1;
+    ctx.font = `bold ${Math.round(size * pop)}px Outfit, sans-serif`;
+    ctx.globalAlpha = t > 0.7 ? 0.55 : 1;
+    const x = Math.round(n.x);
+    const y = Math.round(n.y);
+    ctx.fillStyle = "#14161c";
+    ctx.fillText(n.text, x + 1, y + 1);
+    ctx.fillText(n.text, x - 1, y + 1);
+    ctx.fillStyle = n.color;
+    ctx.fillText(n.text, x, y);
+  }
+  ctx.globalAlpha = 1;
+}
+
 function drawPlus(ctx: CanvasRenderingContext2D, x: number, y: number, k: number): void {
   const t = 1 - k;
   ctx.save();
