@@ -46,3 +46,16 @@ export function powerKey(d: Pick<Drop, "kind" | "mod" | "shot">): PowerKey | nul
   if (d.kind === "mod" && d.mod) return d.mod;
   return null;
 }
+
+/** Short text floated over the hero's head on pickup (~1 s, then fades). */
+export const PICKUP_LABEL: Record<PowerKey, string> = {
+  bolt: "Bolt Shot",
+  beam: "Beam Shot",
+  wave: "Wave Shot",
+  fire: "Fire Shot",
+  ice: "Ice Shot",
+  water: "Water Shot",
+  speed: "Speed Up",
+  amount: "+1 Shot",
+  rage: "Rage!",
+};

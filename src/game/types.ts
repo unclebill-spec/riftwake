@@ -177,7 +177,15 @@ export type Prop = {
   x: number;
   y: number;
   r: number;
-  kind: "tree" | "boulder";
+  kind: "tree" | "boulder" | "pine" | "house";
+  /** Art cell for pine/house (terrainArt BUILDING_ART index). */
+  art?: number;
+};
+
+/** Visual-only ground area (no movement effect): a union of circles [x, y, r]. */
+export type TerrainZone = {
+  kind: "snow" | "ice" | "water";
+  parts: [number, number, number][];
 };
 
 export type Hud = {

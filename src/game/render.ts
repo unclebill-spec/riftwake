@@ -1,4 +1,4 @@
-import { ARENA_SIZE, BUFFS, ELITE_MOVE, SHRINE, SURGE, IMPACT_TIME, NUM_TIME, PLUS_TIME, TWIST, type Game } from "@/game/sim";
+import { ARENA_SIZE, BUFFS, PICKUP_TEXT_TIME, ELITE_MOVE, SHRINE, SURGE, IMPACT_TIME, NUM_TIME, PLUS_TIME, TWIST, type Game } from "@/game/sim";
 import {
   blit,
   drawFloorTile,
@@ -23,9 +23,11 @@ import {
   drawGround,
 } from "@/game/sprites";
 import { hash2 } from "@/game/rng";
-import type { ShotType } from "@/game/types";
+import type { Prop, ShotType } from "@/game/types";
+import { behindBuilding, drawTerrainProp, drawZones, zoneCanvas } from "@/game/terrainArt";
 import { monsterName } from "@/game/types";
 import { DROP_HALO_WORLD, DROP_ICON_WORLD, GEAR_HEX, POWER_GLYPH, POWER_HEX, powerKey } from "@/game/drops";
+import { drawOrb, drawPotion, isPotionKey } from "@/game/pickupArt";
 
 const TILE = 48;
 /** World drawn smaller so more of the rift fits on screen. */
@@ -151,7 +153,7 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
   };
   for (let i = 0; i < game.props.length && n < 400; i++) {
     const p = game.props[i];
-    if (!p || !onscreen(game, p.x, p.y, worldW, worldH, 80)) continue;
+    if (!p || !onscreen(game, p.x, p.y, worldW, worldH, p.r > 30 ? 220 : 80)) continue;
     push(p.y, 0, i);
   }
   for (let i = 0; i < game.drops.length && n < 410; i++) {
@@ -175,7 +177,7 @@ export function renderGame(game: Game, ctx: CanvasRenderingContext2D, w: number,
   for (let i = 0; i < n; i++) {
     const item = sortBuf[i];
     if (!item || item.y > 1e8) break;
-    if (item.k === 0) drawProp(ctx, game.props[item.i], game.biome);
+    if (item.k === 0) drawProp(ctx, game.props[item.i], game.biome, occluding(game, game.props[item.i]));
     else if (item.k === 2) drawDrop(ctx, game, item.i, now);
     else if (item.k === 4) drawPortal(ctx, game, now);
     else if (item.k === 5) drawShrine(ctx, game, now);
@@ -315,7 +317,9 @@ function drawFloor(game: Game, ctx: CanvasRenderingContext2D, w: number, h: numb
   const gy = Math.max(0, y0 * TILE);
   const gw = Math.min(ARENA_SIZE, (x1 + 1) * TILE) - gx;
   const gh = Math.min(ARENA_SIZE, (y1 + 1) * TILE) - gy;
+  const zones = game.zones.length ? zoneCanvas(game.seed, game.biome, game.zones, ARENA_SIZE, (x, y) => game.lavaAt(x, y)) : null;
   if (gw > 0 && gh > 0 && drawGround(ctx, game.biome, gx, gy, gw, gh, 3)) {
+    if (zones) drawZones(ctx, zones, gx, gy, gw, gh);
     for (let cy = y0; cy <= y1; cy++) {
       for (let cx = x0; cx <= x1; cx++) {
         const px = cx * TILE;
@@ -348,6 +352,7 @@ function drawFloor(game: Game, ctx: CanvasRenderingContext2D, w: number, h: numb
       if (lava) light(ctx, px + TILE / 2, py + TILE / 2, 30, "rgba(255,110,40,0.9)", 0.7);
     }
   }
+  if (zones) drawZones(ctx, zones, gx, gy, gw, gh);
   // Reused Gravewake stone texture in irregular seeded blobs with a hard dither rim (no tile edges).
   const det = floorDetail(game.seed, game.biome, ARENA_SIZE, TILE, (x, y) => game.lavaAt(x, y), FLOOR_VARIANT_RATE);
   if (det) {
@@ -360,8 +365,23 @@ function drawFloor(game: Game, ctx: CanvasRenderingContext2D, w: number, h: numb
   }
 }
 
-function drawProp(ctx: CanvasRenderingContext2D, prop: { x: number; y: number; r: number; kind: "tree" | "boulder" } | undefined, biome = "rock"): void {
+/** Hero or a live enemy stands behind this house, so its roof should fade. */
+function occluding(game: Game, prop: Prop | undefined): boolean {
+  if (!prop || prop.kind !== "house") return false;
+  if (behindBuilding(prop, game.player.x, game.player.y)) return true;
+  for (const e of game.enemies) if (e.alive && behindBuilding(prop, e.x, e.y)) return true;
+  return false;
+}
+
+function drawProp(ctx: CanvasRenderingContext2D, prop: Prop | undefined, biome = "rock", fade = false): void {
   if (!prop) return;
+  if (prop.kind === "pine" || prop.kind === "house") {
+    if (!drawTerrainProp(ctx, prop, fade)) {
+      ctx.fillStyle = prop.kind === "pine" ? "#174a7a" : "#2a2060";
+      ctx.fillRect(prop.x - prop.r, prop.y - prop.r * 2, prop.r * 2, prop.r * 2.4);
+    }
+    return;
+  }
   if (prop.kind === "boulder" && drawGroundProp(ctx, biome, prop.x, prop.y, prop.r)) return;
   if (drawPropSprite(ctx, prop.kind, prop.x, prop.y, prop.r * 2.4)) return;
   if (prop.kind === "tree") {
@@ -409,7 +429,11 @@ function drawDrop(ctx: CanvasRenderingContext2D, game: Game, index: number, now:
   // Soft pulsing glow.
   light(ctx, d.x, cy, size * (0.85 + 0.25 * pulse), color, 0.75 + 0.2 * pulse);
   ctx.save();
-  if (key) {
+  if (isPotionKey(key) && drawPotion(ctx, key, d.x, cy + size * 0.5, size)) {
+    // Lasting power-up: potion in its key's colour (drawn above).
+  } else if (key === "rage" && drawOrb(ctx, "rage", d.x, cy - 12, size, now + index * 97, d.y)) {
+    // Timed power-up (rage, 8 s): glowing sparkle orb in its colour (drawn above).
+  } else if (key) {
     // Power-up: neon orb with a glyph.
     const r = size * 0.42;
     ctx.fillStyle = "#0c0e12";
@@ -538,6 +562,7 @@ function drawHero(ctx: CanvasRenderingContext2D, game: Game): void {
   const frame = anim === "walk" ? p.frame : Math.min(3, Math.floor((0.35 - p.jumpT) * 12));
   blit(ctx, p.actor, anim, p.facing, frame, p.x, p.y, 1.35);
   if (game.plusT > 0) drawPlus(ctx, p.x, p.y - 54, game.plusT / PLUS_TIME);
+  if (game.pickupT > 0 && game.pickupText) drawPickupText(ctx, game.pickupText, game.pickupColor, p.x, p.y - 82, game.pickupT / PICKUP_TEXT_TIME);
 }
 
 /** Short gold '+' over the hero's head after an auto-equip upgrade: rises ~20 world px and fades. */
@@ -557,7 +582,9 @@ function drawShrine(ctx: CanvasRenderingContext2D, game: Game, now: number): voi
   ctx.restore();
   ctx.save();
   if (blink) ctx.globalAlpha = 0.6;
-  if (!drawNamedProp(ctx, b.art, s.x, s.y, b.color, pulse)) {
+  // Timed shrine buff: glowing sparkle orb in the buff's colour, bobbing over its touch ring.
+  const bob = Math.sin(now / 260) * 4;
+  if (!drawOrb(ctx, s.kind, s.x, s.y - 58 + bob, 48, now, s.y) && !drawNamedProp(ctx, b.art, s.x, s.y, b.color, pulse)) {
     ctx.fillStyle = b.color;
     ctx.fillRect(s.x - 8, s.y - 40, 16, 40);
   }
@@ -606,6 +633,30 @@ function drawPlus(ctx: CanvasRenderingContext2D, x: number, y: number, k: number
   ctx.strokeText("+", Math.round(x), yy);
   ctx.fillStyle = "#e0b15a";
   ctx.fillText("+", Math.round(x), yy);
+  ctx.restore();
+}
+
+/**
+ * Pickup text over the hero's head: drawn in screen pixels (18 px bold, dark outline) so it stays
+ * readable at 844x390 phone landscape; holds ~0.6 s, rises a little and fades over the rest.
+ */
+function drawPickupText(ctx: CanvasRenderingContext2D, text: string, color: string, x: number, y: number, k: number): void {
+  const t = 1 - k;
+  const m = ctx.getTransform();
+  const sx = Math.round(m.a * x + m.e);
+  const sy = Math.round(m.d * y + m.f - t * 14);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = Math.min(1, k / 0.45);
+  ctx.font = "bold 18px Outfit, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = "#0b0d14";
+  ctx.strokeText(text, sx, sy);
+  ctx.fillStyle = color;
+  ctx.fillText(text, sx, sy);
   ctx.restore();
 }
 

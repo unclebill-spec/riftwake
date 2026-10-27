@@ -1,4 +1,5 @@
 import { AudioBus } from "@/game/audio";
+import { PICKUP_LABEL, POWER_HEX, powerKey } from "@/game/drops";
 import {
   ARENA,
   DIFF,
@@ -34,6 +35,7 @@ import {
   type Part,
   type Proj,
   type Prop,
+  type TerrainZone,
   type RunSave,
   type Settings,
   type ShotType,
@@ -135,6 +137,8 @@ export class Game {
   readonly beams: Beam[] = Array.from({ length: MAX_B }, makeBeam);
   readonly impacts: Impact[] = Array.from({ length: MAX_FX }, () => ({ alive: false, x: 0, y: 0, type: "bolt" as ShotType | "enemy", t: 0 }));
   props: Prop[] = [];
+  /** Snow / ice / water areas: visual only (walkable, no slide). */
+  zones: TerrainZone[] = [];
   kinds: MonsterId[] = ["skeleton", "orc", "zombie"];
   biome: "rock" | "forest" | "snow" | "ice" | "lava" = "rock";
   seed = 1;
@@ -179,6 +183,10 @@ export class Game {
   clearedLevel = 1;
   /** Seconds left on the '+' pop over the hero's head after an auto-equip upgrade (transient, never saved). */
   plusT = 0;
+  /** Pickup text over the hero's head (PICKUP_TEXT_TIME s, then fades). */
+  pickupText = "";
+  pickupColor = "#ffffff";
+  pickupT = 0;
   /** Juice (feel only, never saved): seconds of hit-stop left; frame() skips sim steps while > 0. */
   hitStop = 0;
   private comboWordT = 0;
@@ -493,6 +501,7 @@ export class Game {
     this.camReady = false;
     this.accum = 0;
     this.plusT = 0;
+    this.pickupT = 0;
     this.hitStop = 0;
     this.comboWordT = 0;
     this.lastCombo = "";
@@ -564,6 +573,7 @@ export class Game {
       if (this.props.some((p) => Math.hypot(p.x - x, p.y - y) < p.r + r + 70)) continue;
       this.props.push({ x, y, r, kind: tree ? "tree" : "boulder" });
     }
+    this.buildTerrain();
     if (this.level === 1) this.kinds = ["skeleton", "orc", "zombie"];
     else {
       const n = 1 + Math.floor(rng() * 4);
@@ -924,6 +934,84 @@ export class Game {
       if (Math.hypot(x - p.x, y - p.y) < radius + p.r) return true;
     }
     return false;
+  }
+
+  /**
+   * Terrain variety from its own rng (the main rng stream, and so every existing prop/enemy roll, is unchanged):
+   * snow / ice / water areas (visual only) and SOLID houses and pines (circle colliders like rocks).
+   * Spawn and portal stay clear (TERRAIN_CLEAR + r) and every obstacle keeps the existing r + r + 70 lane.
+   */
+  private buildTerrain(): void {
+    const rng = mulberry32(((this.seed || 1) ^ 0x7e44a1) >>> 0);
+    const px = this.player.x, py = this.player.y, qx = this.portal.x, qy = this.portal.y;
+    this.zones = [];
+    const kinds: TerrainZone["kind"][] = (["snow", "ice", "water"] as const).filter((k) => k !== this.biome);
+    const nz = 5 + Math.floor(rng() * 3);
+    for (let i = 0, tries = 0; i < nz && tries < 120; tries++) {
+      const r = 170 + rng() * 150;
+      const x = 320 + rng() * (ARENA - 640);
+      const y = 320 + rng() * (ARENA - 640);
+      const kind = kinds[Math.floor(rng() * kinds.length)] ?? "snow";
+      const parts: [number, number, number][] = [[x, y, r]];
+      for (let k = 0; k < 3; k++) {
+        const a = rng() * Math.PI * 2;
+        parts.push([x + Math.cos(a) * r * 0.7, y + Math.sin(a) * r * 0.7, r * (0.45 + rng() * 0.3)]);
+      }
+      const reach = r * 1.5;
+      if (Math.hypot(x - px, y - py) < reach + TERRAIN_CLEAR.spawn || Math.hypot(x - qx, y - qy) < reach + TERRAIN_CLEAR.portal) continue;
+      if (this.zones.some((z) => Math.hypot(z.parts[0][0] - x, z.parts[0][1] - y) < z.parts[0][2] + r + 120)) continue;
+      // Water never covers an existing rock/crystal/tree: skip the candidate (props stay put, so their rng stream
+      // and positions are unchanged). WATER_PROP_GAP covers the noisy dithered rim.
+      if (kind === "water") {
+        // Shrink each lobe to clear the props around it (drop lobes that get too small); skip if the pool vanishes.
+        for (const part of parts) for (const p of this.props) part[2] = Math.min(part[2], Math.hypot(p.x - part[0], p.y - part[1]) - p.r - WATER_PROP_GAP);
+        const kept = parts.filter((q) => q[2] >= 60);
+        if (!kept.length || kept[0] !== parts[0] || kept[0][2] < 110) continue;
+        parts.length = 0;
+        parts.push(...kept);
+      }
+      this.zones.push({ kind, parts });
+      i++;
+    }
+    const place = (x: number, y: number, r: number, kind: Prop["kind"], art: number): boolean => {
+      if (x < 150 || y < 150 || x > ARENA - 150 || y > ARENA - 150) return false;
+      if (Math.hypot(x - px, y - py) < TERRAIN_CLEAR.spawn + r || Math.hypot(x - qx, y - qy) < TERRAIN_CLEAR.portal + r) return false;
+      if (this.lavaAt(x, y)) return false;
+      if (this.zones.some((z) => z.kind === "water" && z.parts.some(([zx, zy, zr]) => Math.hypot(x - zx, y - zy) < zr + r + WATER_PROP_GAP))) return false;
+      if (this.props.some((p) => Math.hypot(p.x - x, p.y - y) < p.r + r + 70)) return false;
+      this.props.push({ x, y, r, kind, art });
+      return true;
+    };
+    // Hamlets: 2-3 clusters of 2-4 houses (huts/tents removed 10/27: off-style).
+    const hamlets = 2 + Math.floor(rng() * 2);
+    for (let h = 0, tries = 0; h < hamlets && tries < 40; tries++) {
+      const cx = 400 + rng() * (ARENA - 800);
+      const cy = 400 + rng() * (ARENA - 800);
+      if (Math.hypot(cx - px, cy - py) < 520 || Math.hypot(cx - qx, cy - qy) < 520) continue;
+      let built = 0;
+      const n = 2 + Math.floor(rng() * 3);
+      for (let k = 0; k < n * 3 && built < n; k++) {
+        const a = rng() * Math.PI * 2, d = built ? 150 + rng() * 90 : 0;
+        if (place(cx + Math.cos(a) * d, cy + Math.sin(a) * d, 44, "house", Math.floor(rng() * 2))) built++;
+      }
+      if (built) h++;
+    }
+    // Pines (and the odd neon yew) around snow and ice areas.
+    for (const z of this.zones) {
+      if (z.kind === "water") continue;
+      const [zx, zy, zr] = z.parts[0];
+      const n = 3 + Math.floor(rng() * 4);
+      for (let k = 0; k < n * 2; k++) {
+        const a = rng() * Math.PI * 2, d = zr * (0.3 + rng() * 0.9);
+        place(zx + Math.cos(a) * d, zy + Math.sin(a) * d, 20, "pine", rng() < 0.2 ? 4 : 2 + Math.floor(rng() * 2));
+      }
+    }
+  }
+
+  /** Which terrain area (if any) covers a point; visual only. */
+  zoneAt(x: number, y: number): TerrainZone["kind"] | null {
+    for (const z of this.zones) for (const [zx, zy, zr] of z.parts) if (Math.hypot(x - zx, y - zy) < zr) return z.kind;
+    return null;
   }
 
   lavaAt(x: number, y: number): boolean {
@@ -1320,12 +1408,19 @@ export class Game {
     return false;
   }
 
+  private popPickup(text: string, color: string): void {
+    this.pickupText = text;
+    this.pickupColor = color;
+    this.pickupT = PICKUP_TEXT_TIME;
+  }
+
   private takeShrine(): void {
     const s = this.shrine;
     s.alive = false;
     this.buff = s.kind;
     this.buffT = SHRINE.buffT;
     this.shieldHits = s.kind === "shield" ? SHRINE.shieldHits : 0;
+    this.popPickup(`${BUFFS[s.kind].name}!`, BUFFS[s.kind].color);
     this.banner = `Shrine: ${BUFFS[s.kind].name}!`;
     this.bannerT = 1.6;
     this.spawnImpact(s.x, s.y, "beam");
@@ -1737,6 +1832,7 @@ export class Game {
 
   private dropsStep(dt: number): void {
     this.plusT = Math.max(0, this.plusT - dt);
+    this.pickupT = Math.max(0, this.pickupT - dt);
     for (const d of this.drops) {
       if (!d?.alive) continue;
       d.grace = Math.max(0, d.grace - dt);
@@ -1753,6 +1849,8 @@ export class Game {
     else if (d.kind === "mod" && d.mod === "speed") this.run.mods.speed = Math.min(8, this.run.mods.speed + 1);
     else if (d.kind === "mod" && d.mod === "amount") this.run.mods.amount = Math.min(7, this.run.mods.amount + 1);
     d.alive = false;
+    const key = powerKey(d);
+    if (key) this.popPickup(PICKUP_LABEL[key], POWER_HEX[key]);
     this.audio.pickup();
     if (d.kind === "rage") {
       this.audio.rage();
@@ -1940,6 +2038,11 @@ function distSeg(px: number, py: number, x: number, y: number, dx: number, dy: n
 }
 
 export const PLUS_TIME = 0.9;
+/** Keep-clear radius (plus obstacle r) around the hero spawn and the portal for terrain obstacles. */
+/** World px kept between a water area's circles and any prop (rim noise + dither reach ~69 px). */
+export const WATER_PROP_GAP = 75;
+export const TERRAIN_CLEAR = { spawn: 170, portal: 200 };
+export const PICKUP_TEXT_TIME = 1.1;
 export const NUM_TIME = 0.6;
 /** Rift Surge ultimate (BALANCE.md "Fun batch 2"). mul scales the burst to a wave-scaled normal enemy's base HP (flagged). */
 export const SURGE = { max: 100, kill: 2, elite: 10, combo: 2, mul: 1.5, reachX: 760, reachY: 360, fxTime: 0.5 };
